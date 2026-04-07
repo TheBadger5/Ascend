@@ -1,0 +1,43 @@
+Replace this page with a clean dark-themed dashboard for an app called Ascend.
+
+The page should include:
+
+- Title: "Ascend"
+- Subtitle: "Build discipline daily"
+
+- Section: "Today's Quests"
+  Show 3 quests:
+    1. Physical Health
+    2. Mental Health
+    3. Social Health
+
+Each quest should have a "Complete" button.
+
+Below that, show:
+- Total XP (starting at 0)
+- Level (starting at 1)
+
+XP system:
+- Each completed quest adds +10 XP
+- Every 100 XP = 1 level
+
+Keep the design minimal, modern, and dark themed using Tailwind.
+
+Center everything on the page.
+Make this page fully functional as a client component.
+
+Requirements:
+- Add "use client" at the top
+- Use React state
+- Track completed status for each of the 3 quests
+- Track total XP starting at 0
+- Track level starting at 1
+- When a quest is completed:
+  - if it is not already completed, add 10 XP
+  - mark that quest as completed
+- Prevent the same quest from giving XP twice
+- Level formula:
+  - level = Math.floor(totalXP / 100) + 1
+- Visually show completed quests differently
+- Keep the existing dark, clean, minimal style
+- Keep everything in app/page.tsx for now
