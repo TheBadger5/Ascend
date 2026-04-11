@@ -1,14 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { migrateTrainingXp } from "@/lib/ascend-path-config";
 import { getCurrentUser, getOrCreateProfile } from "@/lib/ascend-data";
 import { supabase } from "@/lib/supabase";
 import LoadingScreen from "../loading-screen";
 
 const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
-const CATEGORY_ORDER = ["physical", "mental", "social"] as const;
-type PathProgress = { xp: number; level: number };
-type PathXpState = Record<(typeof CATEGORY_ORDER)[number], Record<string, PathProgress>>;
 
 type DailyHistoryEntry = {
   date: string;
@@ -64,13 +62,8 @@ export default function StatsPage() {
 
       const rawPathXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
       if (rawPathXp) {
-        const parsed = JSON.parse(rawPathXp) as PathXpState;
-        const sum = CATEGORY_ORDER.reduce(
-          (acc, category) =>
-            acc + Object.values(parsed?.[category] ?? {}).reduce((inner, path) => inner + Number(path.xp ?? 0), 0),
-          0
-        );
-        setTotalXP(sum);
+        const merged = migrateTrainingXp(JSON.parse(rawPathXp));
+        setTotalXP(merged.strength.xp);
       } else {
         setTotalXP(profile.total_xp);
       }

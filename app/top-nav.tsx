@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { loadMonetizationState } from "@/lib/monetization";
 import { supabase } from "@/lib/supabase";
 import LogoutButton from "./logout-button";
 
@@ -12,12 +13,17 @@ export default function TopNav() {
   const pathname = usePathname();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isReviewUnlocked, setIsReviewUnlocked] = useState(false);
+  const [isPaidUser, setIsPaidUser] = useState(true);
   const isAuthPage = pathname === "/login" || pathname === "/signup";
   const isToday = pathname === "/";
   const isProgress = pathname === "/progress";
   const isReview = pathname === "/review";
   const isStats = pathname === "/stats";
-  const isPro = pathname === "/pro";
+  const isUpgrade = pathname === "/upgrade";
+
+  useEffect(() => {
+    setIsPaidUser(loadMonetizationState().isPaidUser);
+  }, [pathname]);
 
   useEffect(() => {
     const syncAuthAndUnlocks = async () => {
@@ -84,7 +90,7 @@ export default function TopNav() {
                 : "text-zinc-300 hover:text-zinc-100"
             }`}
           >
-            System Progress
+            Progress
           </Link>
           <Link
             href="/stats"
@@ -96,16 +102,6 @@ export default function TopNav() {
           >
             Stats
           </Link>
-          <Link
-            href="/pro"
-            className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
-              isPro
-                ? "bg-zinc-200 text-zinc-900"
-                : "text-zinc-300 hover:text-zinc-100"
-            }`}
-          >
-            Ascend Pro
-          </Link>
           {isReviewUnlocked && (
             <Link
               href="/review"
@@ -116,6 +112,16 @@ export default function TopNav() {
               }`}
             >
               Review
+            </Link>
+          )}
+          {!isPaidUser && (
+            <Link
+              href="/upgrade"
+              className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
+                isUpgrade ? "bg-zinc-200 text-zinc-900" : "text-zinc-400 hover:text-zinc-100"
+              }`}
+            >
+              Upgrade
             </Link>
           )}
           </nav>
