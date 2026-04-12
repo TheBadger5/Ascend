@@ -9,8 +9,12 @@ create table if not exists public.profiles (
   level integer not null default 1,
   current_streak integer not null default 0,
   best_streak integer not null default 0,
+  is_paid_user boolean not null default false,
   created_at timestamp with time zone default now()
 );
+
+-- Existing databases: add column if missing
+alter table public.profiles add column if not exists is_paid_user boolean not null default false;
 
 create table if not exists public.daily_tasks (
   id uuid primary key default gen_random_uuid(),
@@ -44,10 +48,22 @@ create table if not exists public.weekly_reviews (
   unique(user_id, week_key)
 );
 
+create table if not exists public.user_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  event_type text not null,
+  metadata jsonb,
+  created_at timestamp with time zone default now()
+);
+
+create index if not exists user_events_user_id_created_at_idx
+  on public.user_events (user_id, created_at desc);
+
 alter table public.profiles enable row level security;
 alter table public.daily_tasks enable row level security;
 alter table public.history enable row level security;
 alter table public.weekly_reviews enable row level security;
+alter table public.user_events enable row level security;
 
 drop policy if exists "profiles_owner_select" on public.profiles;
 drop policy if exists "profiles_owner_insert" on public.profiles;
@@ -100,6 +116,48 @@ create policy "weekly_reviews_owner_update" on public.weekly_reviews
   for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "weekly_reviews_owner_delete" on public.weekly_reviews
   for delete using (auth.uid() = user_id);
+
+drop policy if exists "user_events_owner_insert" on public.user_events;
+drop policy if exists "user_events_owner_select" on public.user_events;
+create policy "user_events_owner_insert" on public.user_events
+  for insert with check (auth.uid() = user_id);
+create policy "user_events_owner_select" on public.user_events
+  for select using (auth.uid() = user_id);
+
+/**
+ * Called only from the Gumroad webhook API route using the Supabase service role.
+ * Looks up auth.users by email (case-insensitive), then sets profiles.is_paid_user = true.
+ * Inserts a profile row if missing (edge case before trigger ran).
+ */
+create or replace function public.grant_paid_access_by_email(p_email text)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id uuid;
+  v_n int;
+begin
+  select id into v_id from auth.users where lower(email) = lower(trim(p_email)) limit 1;
+  if v_id is null then
+    return json_build_object('ok', false, 'reason', 'user_not_found');
+  end if;
+
+  update public.profiles set is_paid_user = true where id = v_id;
+  get diagnostics v_n = row_count;
+  if v_n = 0 then
+    insert into public.profiles (id, is_paid_user)
+    values (v_id, true)
+    on conflict (id) do update set is_paid_user = true;
+  end if;
+
+  return json_build_object('ok', true, 'user_id', v_id);
+end;
+$$;
+
+revoke all on function public.grant_paid_access_by_email(text) from public;
+grant execute on function public.grant_paid_access_by_email(text) to service_role;
 
 create or replace function public.handle_new_user_profile()
 returns trigger

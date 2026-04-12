@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { loadMonetizationState } from "@/lib/monetization";
+import { GUMROAD_ASCEND_CHECKOUT_URL } from "@/lib/monetization";
+import { usePaidAccess } from "@/lib/paid-access-provider";
 import { supabase } from "@/lib/supabase";
 import LogoutButton from "./logout-button";
 
@@ -13,17 +14,13 @@ export default function TopNav() {
   const pathname = usePathname();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isReviewUnlocked, setIsReviewUnlocked] = useState(false);
-  const [isPaidUser, setIsPaidUser] = useState(true);
+  const { isPaidUser, isReady: isPaidReady } = usePaidAccess();
   const isAuthPage = pathname === "/login" || pathname === "/signup";
   const isToday = pathname === "/";
   const isProgress = pathname === "/progress";
   const isReview = pathname === "/review";
   const isStats = pathname === "/stats";
   const isUpgrade = pathname === "/upgrade";
-
-  useEffect(() => {
-    setIsPaidUser(loadMonetizationState().isPaidUser);
-  }, [pathname]);
 
   useEffect(() => {
     const syncAuthAndUnlocks = async () => {
@@ -114,15 +111,17 @@ export default function TopNav() {
               Review
             </Link>
           )}
-          {!isPaidUser && (
-            <Link
-              href="/upgrade"
+          {isPaidReady && !isPaidUser && (
+            <a
+              href={GUMROAD_ASCEND_CHECKOUT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
                 isUpgrade ? "bg-zinc-200 text-zinc-900" : "text-zinc-400 hover:text-zinc-100"
               }`}
             >
               Upgrade
-            </Link>
+            </a>
           )}
           </nav>
           {isAuthenticated && <LogoutButton />}

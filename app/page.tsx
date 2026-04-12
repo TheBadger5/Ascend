@@ -1,6 +1,5 @@
 "use client";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   createEmptyTrainingXp,
@@ -16,10 +15,10 @@ import {
   FREE_MAX_PATH_LEVEL,
   getMaxXpForFreeTier,
   getSessionsRequiredForLevelUp,
-  loadMonetizationState,
+  GUMROAD_ASCEND_CHECKOUT_URL,
   UPGRADE_LIMIT_MESSAGE,
 } from "@/lib/monetization";
-import { getCurrentUser, getOrCreateProfile } from "@/lib/ascend-data";
+import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
 import {
   getActivePathUnlocks,
   getNewlyUnlockedForLevel,
@@ -32,6 +31,7 @@ import {
   getStrengthBeltFromPathLevel,
   getStrengthTrainingPoolForPathLevel,
   getStrengthTrainingPoolForPathLevelAndFocus,
+  strengthTaskTitleIsProOnly,
   STRENGTH_BELT_LABELS,
   type StrengthTaskPoolEntry,
 } from "@/lib/strength-progression";
@@ -65,7 +65,11 @@ import {
   saveSystemIntegrityState,
 } from "@/lib/system-integrity";
 import { supabase } from "@/lib/supabase";
+import { logUserEvent, USER_EVENT_TYPES } from "@/lib/user-events";
 import LoadingScreen from "./loading-screen";
+import RefreshAccessButton from "./refresh-access-button";
+import { effectiveLevelForPathUnlocks } from "@/lib/pro-gating";
+import { useProEntitlement } from "@/lib/use-pro-entitlement";
 
 const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
 const ONBOARDING_STORAGE_KEY = "ascend.onboarding.completed.v1";
@@ -260,11 +264,13 @@ const createDailyQuests = (
   previous: DailyQuest[] = [],
   trainingXp: TrainingXpState = createEmptyTrainingXp(),
   dateKey: string = getLocalDateKey(),
-  isPaidUser = true
+  isPaidUser = false
 ): DailyQuest[] => {
   const previousTitle = previous[0]?.title ?? previous[0]?.task ?? "";
   const pathLevel = getPathLevelFromXp(trainingXp.strength?.xp ?? 0);
-  const focus = getEffectiveTrainingFocus(parseLocalDateKey(dateKey), pathLevel);
+  const focus = getEffectiveTrainingFocus(parseLocalDateKey(dateKey), pathLevel, {
+    forceFreeTierSchedule: !isPaidUser,
+  });
   const pool = getStrengthTrainingPoolForPathLevelAndFocus(pathLevel, focus, { isPaidUser });
   const filtered = pool.filter((item) => item.title !== previousTitle);
   const candidates = filtered.length > 0 ? filtered : pool;
@@ -326,8 +332,9 @@ export default function Dashboard() {
     typeof window !== "undefined" ? msUntilProtocolDeadline() : 0
   );
   const protocolDayKeyRef = useRef<string | null>(null);
-  const [isPaidUser, setIsPaidUser] = useState(false);
-  const router = useRouter();
+  /** Wall-clock start of the extra training session UI (for `session_length_seconds`). */
+  const trainingSessionStartedAtRef = useRef<number | null>(null);
+  const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
 
   useEffect(() => {
     const load = async () => {
@@ -343,9 +350,14 @@ export default function Dashboard() {
         const rawPathXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
         let normalizedXp = migrateTrainingXp(rawPathXp ? JSON.parse(rawPathXp) : null);
         normalizedXp = ensureStrengthLine(normalizedXp);
-        const monetization = loadMonetizationState();
-        setIsPaidUser(monetization.isPaidUser);
-        if (!monetization.isPaidUser) {
+
+        const resolvedPaid = await refreshPaidAccess();
+        const user = await getCurrentUser();
+        let profile: ProfileRow | null = null;
+        if (user) {
+          profile = (await getOrCreateProfile(user.id)) as ProfileRow;
+        }
+        if (!resolvedPaid) {
           const cap = getMaxXpForFreeTier();
           if (normalizedXp.strength.xp > cap) {
             normalizedXp = ensureStrengthLine({
@@ -361,13 +373,12 @@ export default function Dashboard() {
         setTotalXP(metrics.totalXP);
         setLevel(metrics.level);
 
-        const user = await getCurrentUser();
         if (!user) {
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
           return;
         }
+        if (!profile) return;
         setUserId(user.id);
-        const profile = await getOrCreateProfile(user.id);
         const today = getLocalDateKey();
 
         const { data: todayRow } = await supabase
@@ -406,10 +417,20 @@ export default function Dashboard() {
         if (todayRow) {
           const hydratedTodayTasks = hydrateDailyQuests(todayRow.tasks);
           const rawCompleted = (todayRow.completed as boolean[]) ?? [];
-          const { tasks: singleTasks, completed: singleCompleted } = normalizeSingleStrengthTask(
+          let { tasks: singleTasks, completed: singleCompleted } = normalizeSingleStrengthTask(
             hydratedTodayTasks,
             rawCompleted
           );
+          const firstTitle = singleTasks[0]?.title ?? singleTasks[0]?.task ?? "";
+          if (!resolvedPaid && firstTitle && strengthTaskTitleIsProOnly(firstTitle)) {
+            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false);
+            singleTasks = regenerated;
+            singleCompleted = Array.from({ length: regenerated.length }, () => false);
+            await supabase
+              .from("daily_tasks")
+              .update({ tasks: singleTasks, completed: singleCompleted })
+              .eq("id", todayRow.id);
+          }
           setDailyTaskId(String(todayRow.id));
           setDailyQuests(singleTasks);
           setCompleted(singleCompleted);
@@ -423,7 +444,7 @@ export default function Dashboard() {
               .eq("id", todayRow.id);
           }
         } else {
-          const generated = createDailyQuests(previousTasks, trainingXpForDaily, today, monetization.isPaidUser);
+          const generated = createDailyQuests(previousTasks, trainingXpForDaily, today, resolvedPaid);
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
             .from("daily_tasks")
@@ -490,7 +511,7 @@ export default function Dashboard() {
       }
     };
     load();
-  }, [loadVersion]);
+  }, [loadVersion, refreshPaidAccess]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -566,7 +587,7 @@ export default function Dashboard() {
   };
 
   const applyTrainingXpDelta = (delta: number, opts?: { countDailySession?: boolean }) => {
-    const paid = isPaidUser;
+    const paid = effectivePro;
     const sessionsReq = getSessionsRequiredForLevelUp(paid);
     const maxTotalXp = paid ? undefined : getMaxXpForFreeTier();
     setTrainingXpState((prev) => {
@@ -640,10 +661,13 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, [focusTimerRunningByQuest]);
 
+  const strengthLevelForEvents = () => getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
+
   const handleComplete = async (idx: number) => {
     if (!userId || dailyTaskId === null || completed[idx]) return;
     const quest = dailyQuests[idx];
     if (!quest || !hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest)) return;
+    const xpBeforeComplete = trainingXpState.strength?.xp ?? 0;
     const nextCompleted = [...completed];
     nextCompleted[idx] = true;
     setCompleted(nextCompleted);
@@ -682,6 +706,14 @@ export default function Dashboard() {
 
     await supabase.from("daily_tasks").update({ completed: nextCompleted }).eq("id", dailyTaskId);
 
+    if (idx === 0 && userId) {
+      logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_COMPLETED, {
+        quest_id: quest.id,
+        protocol_title: quest.title,
+        strength_level: getPathLevelFromXp(xpBeforeComplete + 10),
+      });
+    }
+
     const allDone = nextCompleted.every(Boolean);
     let streakAfterComplete = currentStreak;
     if (allDone) {
@@ -713,10 +745,10 @@ export default function Dashboard() {
   };
 
   const openTrainingSession = () => {
-    if (!isPaidUser) {
+    if (!effectivePro) {
       setUnlockNotification(`${UPGRADE_LIMIT_MESSAGE} · Full system required for extra sessions.`);
       window.setTimeout(() => setUnlockNotification(null), 5200);
-      router.push("/upgrade");
+      window.open(GUMROAD_ASCEND_CHECKOUT_URL, "_blank", "noopener,noreferrer");
       return;
     }
     const pathLevel = getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
@@ -732,7 +764,18 @@ export default function Dashboard() {
     setSessionExecutedById({});
     setSessionActiveQuest(null);
     setTrainingSessionOpen(true);
+    if (userId) {
+      logUserEvent(userId, USER_EVENT_TYPES.SESSION_STARTED, {});
+    }
   };
+
+  useEffect(() => {
+    if (effectivePro) return;
+    setTrainingSessionOpen(false);
+    setSessionOptions([]);
+    setSessionActiveQuest(null);
+    setSessionExecutedById({});
+  }, [effectivePro]);
 
   const handleSessionProtocolExecute = (quest: DailyQuest) => {
     if (sessionExecutedById[quest.id]) return;
@@ -753,6 +796,17 @@ export default function Dashboard() {
 
   const endTrainingSession = () => {
     const extraCount = Object.values(sessionExecutedById).filter(Boolean).length;
+    const sessionStartedAt = trainingSessionStartedAtRef.current;
+    trainingSessionStartedAtRef.current = null;
+    const sessionLengthSeconds =
+      sessionStartedAt != null ? Math.max(0, Math.round((Date.now() - sessionStartedAt) / 1000)) : undefined;
+    if (userId) {
+      logUserEvent(userId, USER_EVENT_TYPES.SESSION_COMPLETED, {
+        extra_protocols_completed: extraCount,
+        strength_level: strengthLevelForEvents(),
+        ...(sessionLengthSeconds != null ? { session_length_seconds: sessionLengthSeconds } : {}),
+      });
+    }
     if (extraCount >= 1) {
       applyTrainingXpDelta(SESSION_COMPLETION_BONUS_XP);
       setUnlockNotification(`Session ended · +${SESSION_COMPLETION_BONUS_XP} bonus XP`);
@@ -776,11 +830,23 @@ export default function Dashboard() {
       return { ...prev, [questId]: nextOpen };
     });
   };
-  const handleStartProtocol = (quest: DailyQuest, stepCount: number) => {
+  const handleStartProtocol = (
+    quest: DailyQuest,
+    stepCount: number,
+    mode: { kind: "daily" | "session" }
+  ) => {
     const hasPrePromptEffects = getEffectsByType(quest, "pre_protocol_prompt").length > 0;
     if (hasPrePromptEffects && !prePromptSatisfiedByQuest[quest.id] && !expandedQuestIds[quest.id]) {
       setPendingPrePromptQuestId(quest.id);
       return;
+    }
+    if (!expandedQuestIds[quest.id] && userId) {
+      logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_STARTED, {
+        scope: mode.kind,
+        quest_id: quest.id,
+        protocol_title: quest.title,
+        strength_level: strengthLevelForEvents(),
+      });
     }
     toggleProtocol(quest.id, stepCount);
   };
@@ -865,7 +931,7 @@ export default function Dashboard() {
             <button
               type="button"
               className="text-center text-xs text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
-              onClick={() => handleStartProtocol(quest, renderedSteps.length)}
+              onClick={() => handleStartProtocol(quest, renderedSteps.length, mode)}
             >
               {expandedQuestIds[quest.id] ? "Hide training protocol" : "Training protocol details"}
             </button>
@@ -897,6 +963,15 @@ export default function Dashboard() {
                 onClick={() => {
                   setPendingPrePromptQuestId(null);
                   setPrePromptSatisfiedByQuest((prev) => ({ ...prev, [quest.id]: true }));
+                  if (userId) {
+                    logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_STARTED, {
+                      scope: mode.kind,
+                      quest_id: quest.id,
+                      protocol_title: quest.title,
+                      strength_level: strengthLevelForEvents(),
+                      via: "pre_prompt_continue",
+                    });
+                  }
                   toggleProtocol(quest.id, renderedSteps.length);
                 }}
               >
@@ -1119,6 +1194,10 @@ export default function Dashboard() {
     );
   }
 
+  if (!isPaidReady) {
+    return <LoadingScreen label="Loading…" />;
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       {protocolCompletionFeedback && (
@@ -1172,7 +1251,7 @@ export default function Dashboard() {
               </div>
               {(() => {
                 const prog = getProgressionSummary(trainingXpState, {
-                  sessionsRequired: getSessionsRequiredForLevelUp(isPaidUser),
+                  sessionsRequired: getSessionsRequiredForLevelUp(effectivePro),
                 });
                 return (
                   <div className="mt-4 space-y-1.5 border-t border-zinc-800/80 pt-4">
@@ -1204,20 +1283,30 @@ export default function Dashboard() {
             })()}
           </header>
 
-          {!isPaidUser && level >= FREE_MAX_PATH_LEVEL && (
+          {isPaidReady && !isPaidUser && level >= FREE_MAX_PATH_LEVEL && (
             <div className="mb-5 rounded-lg border border-zinc-800/80 bg-zinc-900/35 px-3 py-2.5">
               <p className="text-[11px] leading-relaxed text-zinc-500">
                 {UPGRADE_LIMIT_MESSAGE}.{" "}
-                <Link href="/upgrade" className="font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline">
-                  Unlock full progression
-                </Link>
+                <a
+                  href={GUMROAD_ASCEND_CHECKOUT_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline"
+                >
+                  Get Early Access on Gumroad
+                </a>
               </p>
+              <div className="mt-2 border-t border-zinc-800/50 pt-2">
+                <RefreshAccessButton />
+              </div>
             </div>
           )}
 
           <p className="mb-2 text-sm font-medium leading-snug text-zinc-200">
             {getTodayFocusHeadline(
-              getEffectiveTrainingFocus(new Date(), getPathLevelFromXp(trainingXpState.strength?.xp ?? 0))
+              getEffectiveTrainingFocus(new Date(), getPathLevelFromXp(trainingXpState.strength?.xp ?? 0), {
+                forceFreeTierSchedule: !effectivePro,
+              })
             )}
           </p>
           {getPathLevelFromXp(trainingXpState.strength?.xp ?? 0) < SPLIT_TRAINING_UNLOCK_LEVEL && (
@@ -1228,7 +1317,10 @@ export default function Dashboard() {
           {(() => {
             const nextUnlock = getNextStrengthUnlock(
               STRENGTH_PATH_ID,
-              getPathLevelFromXp(trainingXpState.strength?.xp ?? 0)
+              effectiveLevelForPathUnlocks(
+                getPathLevelFromXp(trainingXpState.strength?.xp ?? 0),
+                effectivePro
+              )
             );
             if (!nextUnlock) return null;
             return (
@@ -1261,13 +1353,28 @@ export default function Dashboard() {
           </ul>
           {dailyQuests.length > 0 && completed[0] && !trainingSessionOpen && (
             <div className="mt-6">
-              <button
-                type="button"
-                onClick={openTrainingSession}
-                className="w-full rounded-xl border border-emerald-500/25 bg-emerald-950/15 py-3 text-sm font-semibold text-emerald-100/95 transition-colors hover:border-emerald-400/40 hover:bg-emerald-950/30"
-              >
-                Continue training
-              </button>
+              {effectivePro ? (
+                <button
+                  type="button"
+                  onClick={openTrainingSession}
+                  className="w-full rounded-xl border border-emerald-500/25 bg-emerald-950/15 py-3 text-sm font-semibold text-emerald-100/95 transition-colors hover:border-emerald-400/40 hover:bg-emerald-950/30"
+                >
+                  Continue training
+                </button>
+              ) : (
+                <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/35 px-4 py-4 text-center">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">Pro</p>
+                  <p className="mt-2 text-sm text-zinc-400">Extra training session is locked.</p>
+                  <a
+                    href={GUMROAD_ASCEND_CHECKOUT_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-3 inline-block text-xs font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline"
+                  >
+                    Get Early Access on Gumroad
+                  </a>
+                </div>
+              )}
             </div>
           )}
           {trainingSessionOpen && (

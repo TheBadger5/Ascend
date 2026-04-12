@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
   createEmptyTrainingXp,
@@ -15,8 +14,10 @@ import {
   FREE_MAX_PATH_LEVEL,
   getMaxXpForFreeTier,
   getSessionsRequiredForLevelUp,
-  loadMonetizationState,
+  GUMROAD_ASCEND_CHECKOUT_URL,
 } from "@/lib/monetization";
+import { useProEntitlement } from "@/lib/use-pro-entitlement";
+import RefreshAccessButton from "../refresh-access-button";
 import { getPathUnlocks } from "@/lib/path-unlocks";
 import { getLastTwoSessions, getStrengthIdentityLine, type PerformanceSessionEntry } from "@/lib/performance-tracking";
 import LoadingScreen from "../loading-screen";
@@ -39,22 +40,21 @@ function sessionSummaryLine(e: PerformanceSessionEntry): string {
 const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
 
 export default function ProgressPage() {
+  const { isPaidUser, isPaidReady, effectivePro } = useProEntitlement();
   const [trainingXp, setTrainingXp] = useState<TrainingXpState>(createEmptyTrainingXp());
   const [isReady, setIsReady] = useState(false);
-  const [isPaidUser, setIsPaidUser] = useState(false);
   const [perfPair, setPerfPair] = useState<{
     previous: PerformanceSessionEntry | null;
     current: PerformanceSessionEntry | null;
   }>({ previous: null, current: null });
 
   useEffect(() => {
+    if (!isPaidReady) return;
     const load = () => {
       const storedXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
       let xpState = migrateTrainingXp(storedXp ? JSON.parse(storedXp) : null);
       xpState = ensureStrengthLine(xpState);
-      const monetization = loadMonetizationState();
-      setIsPaidUser(monetization.isPaidUser);
-      if (!monetization.isPaidUser) {
+      if (!effectivePro) {
         const cap = getMaxXpForFreeTier();
         if (xpState.strength.xp > cap) {
           xpState = ensureStrengthLine({
@@ -69,7 +69,7 @@ export default function ProgressPage() {
       setIsReady(true);
     };
     load();
-  }, []);
+  }, [isPaidReady, effectivePro]);
 
   if (!isReady) {
     return <LoadingScreen label="Loading training progress..." />;
@@ -149,18 +149,23 @@ export default function ProgressPage() {
             </p>
           </div>
 
-          {!isPaidUser && (
+          {isPaidReady && !isPaidUser && (
             <div className="mb-6 rounded-xl border border-zinc-800/90 bg-zinc-900/40 px-4 py-4">
               <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Free tier</p>
               <p className="mt-2 text-sm leading-relaxed text-zinc-400">
                 Progression is capped at Level {FREE_MAX_PATH_LEVEL}. Full system unlocks advanced protocols, faster level-ups, and extra sessions.
               </p>
-              <Link
-                href="/upgrade"
+              <a
+                href={GUMROAD_ASCEND_CHECKOUT_URL}
+                target="_blank"
+                rel="noopener noreferrer"
                 className="mt-3 inline-block text-xs font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline"
               >
-                Upgrade your system
-              </Link>
+                Get Early Access on Gumroad
+              </a>
+              <div className="mt-3 border-t border-zinc-800/60 pt-3">
+                <RefreshAccessButton />
+              </div>
             </div>
           )}
 

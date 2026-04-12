@@ -618,7 +618,7 @@ const POOLS: Record<StrengthBeltId, StrengthTaskPoolEntry[]> = {
 function eligibleForStrengthLevel(
   pool: StrengthTaskPoolEntry[],
   pathLevel: number,
-  isPaidUser = true
+  isPaidUser = false
 ): StrengthTaskPoolEntry[] {
   let gated = pool.filter((e) => e.minStrengthLevel == null || pathLevel >= e.minStrengthLevel);
   if (!isPaidUser) {
@@ -633,7 +633,7 @@ export function getStrengthTrainingPoolForPathLevel(
   opts?: { isPaidUser?: boolean }
 ): StrengthTaskPoolEntry[] {
   const raw = POOLS[getStrengthBeltFromPathLevel(pathLevel)];
-  return eligibleForStrengthLevel(raw, pathLevel, opts?.isPaidUser ?? true);
+  return eligibleForStrengthLevel(raw, pathLevel, opts?.isPaidUser ?? false);
 }
 
 /**
@@ -654,7 +654,7 @@ export function getStrengthTrainingPoolForPathLevelAndFocus(
     const fullFallback = pool.filter((e) => e.focus === "full");
     base = fullFallback.length > 0 ? fullFallback : pool;
   }
-  return eligibleForStrengthLevel(base, pathLevel, opts?.isPaidUser ?? true);
+  return eligibleForStrengthLevel(base, pathLevel, opts?.isPaidUser ?? false);
 }
 
 /** All strength tasks for hydration / title lookup */
@@ -664,4 +664,10 @@ export function findStrengthTaskByTitle(title: string): StrengthTaskPoolEntry | 
     if (hit) return hit;
   }
   return null;
+}
+
+/** Pro-only pool entries carry `minStrengthLevel`; free tier must not use them. */
+export function strengthTaskTitleIsProOnly(title: string): boolean {
+  const e = findStrengthTaskByTitle(title);
+  return e != null && e.minStrengthLevel != null;
 }

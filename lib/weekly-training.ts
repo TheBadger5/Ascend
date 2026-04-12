@@ -35,10 +35,18 @@ export function getTrainingFocusForLocalDate(d: Date): TrainingDayFocus {
 /**
  * Effective focus for daily generation and UI. Rest / light / optional days unchanged;
  * lower & upper days become full-body until split training is unlocked.
+ * When `forceFreeTierSchedule` is true (not Pro), never use split rotation even if level is high.
  */
-export function getEffectiveTrainingFocus(d: Date, strengthLevel: number): TrainingDayFocus {
+export function getEffectiveTrainingFocus(
+  d: Date,
+  strengthLevel: number,
+  opts?: { forceFreeTierSchedule?: boolean }
+): TrainingDayFocus {
   const raw = getTrainingFocusForLocalDate(d);
-  if (strengthLevel >= SPLIT_TRAINING_UNLOCK_LEVEL) return raw;
+  const levelForSplit = opts?.forceFreeTierSchedule
+    ? Math.min(strengthLevel, SPLIT_TRAINING_UNLOCK_LEVEL - 1)
+    : strengthLevel;
+  if (levelForSplit >= SPLIT_TRAINING_UNLOCK_LEVEL) return raw;
   if (raw === "rest" || raw === "rest_light" || raw === "optional") return raw;
   return "full";
 }

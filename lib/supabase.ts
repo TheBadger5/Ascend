@@ -11,4 +11,18 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+/**
+ * Auth: Safari is stricter about Web Locks + storage latency than Chrome; the JS client
+ * coordinates tabs with `navigator.locks` by default. A bounded lock wait avoids rare
+ * deadlocks where `getSession()` never settles before our UI timeout.
+ */
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    // GoTrue supports this; @supabase/supabase-js typings omit it on `auth`.
+    // @ts-expect-error — lockAcquireTimeout (see auth-js GoTrueClientOptions)
+    lockAcquireTimeout: 3000,
+  },
+});

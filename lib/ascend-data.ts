@@ -8,6 +8,8 @@ export type ProfileRow = {
   level: number;
   current_streak: number;
   best_streak: number;
+  /** Pro access — set in Supabase (`is_paid_user`), e.g. via Gumroad webhook. */
+  is_paid_user?: boolean;
 };
 
 export type DailyTasksRow = {
@@ -45,6 +47,7 @@ export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> =>
     level: 1,
     current_streak: 0,
     best_streak: 0,
+    is_paid_user: false,
   };
   await supabase.from("profiles").upsert(fallback);
   return fallback;
