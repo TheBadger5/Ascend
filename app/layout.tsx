@@ -19,6 +19,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Ascend",
   description: "Daily discipline tracker",
+  icons: {
+    icon: "/ascend-logo.png",
+    apple: "/ascend-logo.png",
+  },
 };
 
 export default function RootLayout({

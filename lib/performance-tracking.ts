@@ -3,6 +3,7 @@
  * Not full analytics — last sessions + simple comparisons only.
  */
 
+import { STRONGER_THAN_LAST_SESSION_LINE } from "./emotional-feedback";
 import type { PathUnlock } from "./path-unlocks";
 
 export const PERFORMANCE_STORAGE_KEY = "ascend.performance-sessions.v1";
@@ -149,6 +150,6 @@ export function getStrengthIdentityLine(
 ): string | null {
   if (!previous || !current) return null;
   return getPerformanceComparisonMessages(previous, current).length > 0
-    ? "You're stronger than last session"
+    ? STRONGER_THAN_LAST_SESSION_LINE
     : null;
 }

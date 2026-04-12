@@ -1,9 +1,9 @@
 "use client";
 
+import AscendLogo from "@/components/ascend-logo";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { GUMROAD_ASCEND_CHECKOUT_URL } from "@/lib/monetization";
 import { usePaidAccess } from "@/lib/paid-access-provider";
 import { supabase } from "@/lib/supabase";
 import LogoutButton from "./logout-button";
@@ -63,9 +63,10 @@ export default function TopNav() {
       <div className="mx-auto flex w-full max-w-3xl items-center justify-between px-4 py-4">
         <Link
           href="/"
-          className="text-sm font-semibold tracking-[0.2em] text-zinc-100 transition-colors hover:text-zinc-300"
+          className="flex items-center gap-2 transition-opacity hover:opacity-90"
+          aria-label="Ascend home"
         >
-          ASCEND
+          <AscendLogo size={40} priority />
         </Link>
         <div className="flex items-center gap-3">
           <nav className="flex items-center gap-1 rounded-full border border-zinc-700/80 bg-zinc-900/80 p-1">
@@ -112,16 +113,14 @@ export default function TopNav() {
             </Link>
           )}
           {isPaidReady && !isPaidUser && (
-            <a
-              href={GUMROAD_ASCEND_CHECKOUT_URL}
-              target="_blank"
-              rel="noopener noreferrer"
+            <Link
+              href="/upgrade"
               className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
                 isUpgrade ? "bg-zinc-200 text-zinc-900" : "text-zinc-400 hover:text-zinc-100"
               }`}
             >
               Upgrade
-            </a>
+            </Link>
           )}
           </nav>
           {isAuthenticated && <LogoutButton />}

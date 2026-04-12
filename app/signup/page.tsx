@@ -1,5 +1,6 @@
 "use client";
 
+import AscendLogo from "@/components/ascend-logo";
 import Link from "next/link";
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -29,6 +30,9 @@ export default function SignupPage() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <main className="mx-auto flex min-h-screen w-full max-w-3xl items-center justify-center px-4 py-8">
         <section className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/95 px-6 py-8 shadow-[0_20px_60px_-35px_rgba(0,0,0,0.9)]">
+          <div className="mb-6 flex justify-center">
+            <AscendLogo size={72} priority />
+          </div>
           <h1 className="mb-2 text-3xl font-semibold tracking-tight text-zinc-50">Sign Up</h1>
           <p className="mb-6 text-sm text-zinc-400">Create your Ascend account.</p>
 

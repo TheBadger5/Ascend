@@ -1,5 +1,4 @@
 "use client";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
   createEmptyTrainingXp,
@@ -15,14 +14,21 @@ import {
   FREE_MAX_PATH_LEVEL,
   getMaxXpForFreeTier,
   getSessionsRequiredForLevelUp,
-  GUMROAD_ASCEND_CHECKOUT_URL,
   UPGRADE_LIMIT_MESSAGE,
 } from "@/lib/monetization";
+import {
+  FIRST_SYSTEM_MOMENT_LINE_1,
+  FIRST_SYSTEM_MOMENT_LINE_2,
+  FIRST_SYSTEM_MOMENT_STORAGE_KEY,
+  HOME_HERO_HEADLINE,
+  HOME_HERO_SUBHEADLINE,
+} from "@/lib/pro-conversion-copy";
 import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
 import {
   getActivePathUnlocks,
   getNewlyUnlockedForLevel,
   getNextStrengthUnlock,
+  getPathUnlocks,
   SPLIT_TRAINING_UNLOCK_LEVEL,
   type PathUnlock,
 } from "@/lib/path-unlocks";
@@ -43,8 +49,18 @@ import {
 import {
   PROTOCOL_COMPLETION_CONTEXT,
   PROTOCOL_COMPLETION_HEADLINE,
+  PROTOCOL_COMPLETION_SUBLINE,
+  STRONGER_THAN_LAST_SESSION_LINE,
+  STREAK_CHAIN_REMINDER,
   formatStreakIdentityLine,
 } from "@/lib/emotional-feedback";
+import {
+  INTEGRITY_PRESSURE_HINT,
+  MISSED_YESTERDAY_SESSION,
+  URGENCY_MAINTAIN_SYSTEM,
+  streakPressureLine,
+  trainingProtocolExpirySentence,
+} from "@/lib/pressure-copy";
 import {
   appendPerformanceSession,
   buildSessionEntry,
@@ -52,11 +68,7 @@ import {
   getLastTwoSessions,
   getStrengthIdentityLine,
 } from "@/lib/performance-tracking";
-import {
-  addDaysToDateKey,
-  formatExpiresInHoursLabel,
-  msUntilProtocolDeadline,
-} from "@/lib/daily-protocol-urgency";
+import { addDaysToDateKey, msUntilProtocolDeadline } from "@/lib/daily-protocol-urgency";
 import {
   getIntegrityStatusLabel,
   loadSystemIntegrityState,
@@ -66,9 +78,38 @@ import {
 } from "@/lib/system-integrity";
 import { supabase } from "@/lib/supabase";
 import { logUserEvent, USER_EVENT_TYPES } from "@/lib/user-events";
+import ProLockedCard from "@/components/pro-locked-card";
+import BaselineSession from "./baseline-session";
 import LoadingScreen from "./loading-screen";
-import RefreshAccessButton from "./refresh-access-button";
+import { hasCompletedBaseline, improvementLines, protocolScalingHint } from "@/lib/baseline-metrics";
 import { effectiveLevelForPathUnlocks } from "@/lib/pro-gating";
+import {
+  getStrengthRank,
+  loadStrengthIdentitySnapshot,
+  nextIdentityNotice,
+  saveStrengthIdentitySnapshot,
+} from "@/lib/strength-identity";
+import {
+  formatUnlockCelebration,
+  lockedPathTeaser,
+  nextUnlockAnticipationLine,
+  unlockLevelPreviewLine,
+} from "@/lib/unlock-messaging";
+import {
+  applyReadinessAdjustments,
+  loadReadinessForDate,
+  saveReadinessForDate,
+  SESSION_ADJUSTED_MESSAGE,
+  type ReadinessLevel,
+} from "@/lib/readiness-adjust";
+import {
+  STAY_CONSISTENT_REMINDER,
+  formatNextSessionAvailableLine,
+  formatWeeklyGoalLine,
+  formatXpToNextLevelLine,
+  mondayDateKeyForLocalWeekContaining,
+  sundayDateKeyFromMonday,
+} from "@/lib/retention-loops";
 import { useProEntitlement } from "@/lib/use-pro-entitlement";
 
 const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
@@ -252,14 +293,6 @@ const getLocalDateKey = () => {
 const dayDiff = (a: string, b: string) =>
   Math.floor((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000);
 
-const getCurrentRank = (level: number) => {
-  if (level >= 20) return "Black Belt";
-  if (level >= 15) return "Brown Belt";
-  if (level >= 10) return "Purple Belt";
-  if (level >= 5) return "Blue Belt";
-  return "White Belt";
-};
-
 const createDailyQuests = (
   previous: DailyQuest[] = [],
   trainingXp: TrainingXpState = createEmptyTrainingXp(),
@@ -326,6 +359,9 @@ export default function Dashboard() {
   const [sessionActiveQuest, setSessionActiveQuest] = useState<DailyQuest | null>(null);
   const [sessionExecutedById, setSessionExecutedById] = useState<Record<number, boolean>>({});
   const [systemIntegrityScore, setSystemIntegrityScore] = useState(100);
+  const [dailyReadiness, setDailyReadiness] = useState<ReadinessLevel>("normal");
+  const [weeklySessionsCount, setWeeklySessionsCount] = useState(0);
+  const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const [yesterdayDailyMissed, setYesterdayDailyMissed] = useState(false);
   const [yesterdayProtocolTitle, setYesterdayProtocolTitle] = useState<string | null>(null);
   const [expiryMs, setExpiryMs] = useState(() =>
@@ -334,7 +370,18 @@ export default function Dashboard() {
   const protocolDayKeyRef = useRef<string | null>(null);
   /** Wall-clock start of the extra training session UI (for `session_length_seconds`). */
   const trainingSessionStartedAtRef = useRef<number | null>(null);
+  const firstSystemMomentPendingRef = useRef(false);
   const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
+  const [showBaselineSession, setShowBaselineSession] = useState(false);
+  const [profileSnapshot, setProfileSnapshot] = useState<ProfileRow | null>(null);
+  const [proConversionModalOpen, setProConversionModalOpen] = useState(false);
+  const [firstSystemMomentOpen, setFirstSystemMomentOpen] = useState(false);
+
+  useEffect(() => {
+    if (effectivePro && proConversionModalOpen) {
+      setProConversionModalOpen(false);
+    }
+  }, [effectivePro, proConversionModalOpen]);
 
   useEffect(() => {
     const load = async () => {
@@ -375,10 +422,17 @@ export default function Dashboard() {
 
         if (!user) {
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
+          setProfileSnapshot(null);
           return;
         }
         if (!profile) return;
+        setProfileSnapshot(profile);
         setUserId(user.id);
+        if (!hasCompletedBaseline(profile)) {
+          setShowBaselineSession(true);
+          return;
+        }
+        setShowBaselineSession(false);
         const today = getLocalDateKey();
 
         const { data: todayRow } = await supabase
@@ -506,6 +560,23 @@ export default function Dashboard() {
         const nextIntegrity = reconcileSkipPenalties(missedDates, integrityState);
         saveSystemIntegrityState(nextIntegrity);
         setSystemIntegrityScore(nextIntegrity.score);
+
+        const weekMon = mondayDateKeyForLocalWeekContaining(today);
+        const weekSun = sundayDateKeyFromMonday(weekMon);
+        const { data: weekRows } = await supabase
+          .from("daily_tasks")
+          .select("tasks, completed")
+          .eq("user_id", user.id)
+          .gte("date", weekMon)
+          .lte("date", weekSun);
+        let weekCompleted = 0;
+        for (const row of weekRows ?? []) {
+          const wh = hydrateDailyQuests(row.tasks);
+          const wRaw = (row.completed as boolean[]) ?? [];
+          const { completed: wSingle } = normalizeSingleStrengthTask(wh, wRaw);
+          if (wSingle[0]) weekCompleted += 1;
+        }
+        setWeeklySessionsCount(weekCompleted);
       } finally {
         setIsReady(true);
       }
@@ -527,6 +598,24 @@ export default function Dashboard() {
     const id = window.setInterval(tick, 30000);
     return () => window.clearInterval(id);
   }, [isReady, loadVersion]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    const saved = loadReadinessForDate(getLocalDateKey());
+    setDailyReadiness(saved ?? "normal");
+  }, [isReady, loadVersion]);
+
+  useEffect(() => {
+    if (!isPaidReady || !isReady || showOnboarding || showBaselineSession) return;
+    const prev = loadStrengthIdentitySnapshot();
+    const rank = getStrengthRank(level);
+    const notice = nextIdentityNotice(prev, level);
+    saveStrengthIdentitySnapshot({ lastLevel: level, lastRank: rank });
+    if (!notice) return;
+    setIdentityNotice(notice);
+    const t = window.setTimeout(() => setIdentityNotice(null), 5200);
+    return () => window.clearTimeout(t);
+  }, [isPaidReady, isReady, level, showOnboarding, showBaselineSession]);
 
   const xpInCurrentLevel = totalXP % 100;
   const levelProgressPercent = xpInCurrentLevel;
@@ -605,14 +694,10 @@ export default function Dashboard() {
       const updatedLevel = getPathLevelFromXp(nextState.strength.xp);
       const newlyUnlocked = getNewlyUnlockedForLevel(STRENGTH_PATH_ID, previousPathLevel, updatedLevel);
       if (newlyUnlocked.length > 0) {
-        const label = newlyUnlocked.map((u) => u.title).join(" · ");
-        setUnlockNotification(`You've unlocked a new training capability: ${label}`);
-        window.setTimeout(() => setUnlockNotification(null), 4200);
+        setUnlockNotification(formatUnlockCelebration(newlyUnlocked));
+        window.setTimeout(() => setUnlockNotification(null), 5800);
       } else if (!paid && delta > 0 && xpBefore + delta > xpAfter) {
-        window.setTimeout(() => {
-          setUnlockNotification(UPGRADE_LIMIT_MESSAGE);
-          window.setTimeout(() => setUnlockNotification(null), 5200);
-        }, 0);
+        window.setTimeout(() => setProConversionModalOpen(true), 0);
       }
       window.localStorage.setItem(PATH_XP_STORAGE_KEY, JSON.stringify(nextState));
       const metrics = getSystemMetricsFromTrainingXp(nextState);
@@ -736,6 +821,10 @@ export default function Dashboard() {
     }
 
     if (idx === 0) {
+      if (typeof window !== "undefined" && !window.localStorage.getItem(FIRST_SYSTEM_MOMENT_STORAGE_KEY)) {
+        firstSystemMomentPendingRef.current = true;
+      }
+      setWeeklySessionsCount((w) => w + 1);
       setProtocolCompletionFeedback({
         streak: streakAfterComplete,
         streakLine: formatStreakIdentityLine(streakAfterComplete),
@@ -745,12 +834,7 @@ export default function Dashboard() {
   };
 
   const openTrainingSession = () => {
-    if (!effectivePro) {
-      setUnlockNotification(`${UPGRADE_LIMIT_MESSAGE} · Full system required for extra sessions.`);
-      window.setTimeout(() => setUnlockNotification(null), 5200);
-      window.open(GUMROAD_ASCEND_CHECKOUT_URL, "_blank", "noopener,noreferrer");
-      return;
-    }
+    if (!effectivePro) return;
     const pathLevel = getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
     const pool = getStrengthTrainingPoolForPathLevel(pathLevel, { isPaidUser: true });
     const dailyTitle = dailyQuests[0]?.title ?? "";
@@ -1194,9 +1278,43 @@ export default function Dashboard() {
     );
   }
 
+  if (showBaselineSession && userId) {
+    return (
+      <BaselineSession
+        userId={userId}
+        onComplete={() => {
+          setShowBaselineSession(false);
+          setLoadVersion((v) => v + 1);
+        }}
+      />
+    );
+  }
+
   if (!isPaidReady) {
     return <LoadingScreen label="Loading…" />;
   }
+
+  const baselineFeedback = improvementLines(profileSnapshot);
+  const protocolBaselineLine = protocolScalingHint(
+    profileSnapshot,
+    getPathLevelFromXp(trainingXpState.strength?.xp ?? 0)
+  );
+  const strengthRank = getStrengthRank(level);
+  const pressureStreakLine = streakPressureLine(currentStreak);
+  const pathXp = trainingXpState.strength?.xp ?? 0;
+  const xpToNextRetentionLine = formatXpToNextLevelLine(pathXp);
+  const pathLevelForUnlocks = getPathLevelFromXp(pathXp);
+  const effUnlockLevel = effectiveLevelForPathUnlocks(pathLevelForUnlocks, effectivePro);
+  const nextStrengthUnlock = getNextStrengthUnlock(STRENGTH_PATH_ID, effUnlockLevel);
+  const unlockAnticipation = nextUnlockAnticipationLine({
+    currentXp: pathXp,
+    effectivePro,
+    nextUnlock: nextStrengthUnlock,
+  });
+  const furtherLockedUnlocks = getPathUnlocks(STRENGTH_PATH_ID)
+    .filter((u) => u.levelRequirement > effUnlockLevel)
+    .sort((a, b) => a.levelRequirement - b.levelRequirement)
+    .slice(1, 3);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -1205,36 +1323,116 @@ export default function Dashboard() {
           <div className="w-full max-w-md rounded-2xl border border-zinc-700/90 bg-zinc-900/95 px-6 py-7 text-left shadow-[0_24px_80px_-40px_rgba(255,255,255,0.2)] transition-all duration-300">
             <p className="text-xl font-semibold leading-snug tracking-tight text-zinc-50">{PROTOCOL_COMPLETION_HEADLINE}</p>
             <p className="mt-3 text-sm leading-relaxed text-zinc-400">{PROTOCOL_COMPLETION_CONTEXT}</p>
+            <p className="mt-4 text-sm leading-relaxed text-zinc-300">{PROTOCOL_COMPLETION_SUBLINE}</p>
             {protocolCompletionFeedback.streakLine && (
-              <p className="mt-5 text-sm leading-relaxed text-zinc-300">{protocolCompletionFeedback.streakLine}</p>
+              <div className="mt-6 border-t border-zinc-800/80 pt-5">
+                <p className="text-sm leading-relaxed text-zinc-300">{protocolCompletionFeedback.streakLine}</p>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-500">{STREAK_CHAIN_REMINDER}</p>
+              </div>
             )}
             {protocolCompletionFeedback.stronger && (
-              <p className="mt-4 text-sm font-medium leading-relaxed text-emerald-500/90">
-                {"You're stronger than last session"}
+              <p className="mt-5 text-sm font-medium leading-relaxed text-emerald-500/85">
+                {STRONGER_THAN_LAST_SESSION_LINE}
               </p>
             )}
             <button
               type="button"
               className="mt-8 w-full rounded-full border border-zinc-600 bg-zinc-100 px-5 py-2.5 text-sm font-medium text-zinc-900 transition-colors duration-200 hover:border-zinc-400 hover:bg-white"
-              onClick={() => setProtocolCompletionFeedback(null)}
+              onClick={() => {
+                setProtocolCompletionFeedback(null);
+                if (firstSystemMomentPendingRef.current) {
+                  firstSystemMomentPendingRef.current = false;
+                  setFirstSystemMomentOpen(true);
+                }
+              }}
             >
               Continue
             </button>
           </div>
         </div>
       )}
+      {identityNotice && (
+        <div className="fixed left-1/2 top-[4.5rem] z-[66] w-[min(90vw,20rem)] -translate-x-1/2 rounded-lg border border-zinc-700/90 bg-zinc-900/95 px-4 py-2.5 text-center text-xs font-medium leading-snug tracking-tight text-zinc-200 shadow-[0_12px_40px_-25px_rgba(255,255,255,0.2)]">
+          {identityNotice}
+          <button
+            type="button"
+            className="ml-2 inline align-baseline text-[10px] font-medium text-zinc-500 hover:text-zinc-300"
+            onClick={() => setIdentityNotice(null)}
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {unlockNotification && (
-        <div className="fixed right-4 top-20 z-[65] max-w-sm rounded-xl border border-zinc-700 bg-zinc-900/95 px-4 py-2.5 text-left text-xs leading-snug text-zinc-200 shadow-[0_12px_40px_-25px_rgba(255,255,255,0.35)]">
+        <div className="fixed right-4 top-20 z-[65] max-w-md rounded-xl border border-emerald-900/40 bg-zinc-900/95 px-4 py-3 text-left text-xs leading-relaxed text-zinc-200 shadow-[0_12px_40px_-25px_rgba(16,185,129,0.12)] whitespace-pre-line">
           {unlockNotification}
+        </div>
+      )}
+      {proConversionModalOpen && (
+        <div className="fixed inset-0 z-[72] flex items-center justify-center bg-black/70 px-4 py-8 backdrop-blur-sm">
+          <div className="relative w-full max-w-md">
+            <button
+              type="button"
+              className="absolute -top-1 right-0 z-10 rounded-full px-2 py-1 text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-200"
+              onClick={() => setProConversionModalOpen(false)}
+              aria-label="Close"
+            >
+              Close
+            </button>
+            <ProLockedCard variant="standard" className="mt-6" />
+          </div>
+        </div>
+      )}
+      {firstSystemMomentOpen && (
+        <div className="fixed inset-0 z-[73] flex items-center justify-center bg-black/65 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-700/80 bg-zinc-900/95 px-6 py-8 text-left shadow-[0_24px_80px_-40px_rgba(0,0,0,0.85)]">
+            <p className="text-lg font-semibold leading-snug tracking-tight text-zinc-50">{FIRST_SYSTEM_MOMENT_LINE_1}</p>
+            <p className="mt-4 text-sm leading-relaxed text-zinc-500">{FIRST_SYSTEM_MOMENT_LINE_2}</p>
+            <button
+              type="button"
+              className="mt-8 w-full rounded-full border border-zinc-600 bg-zinc-100 px-5 py-2.5 text-sm font-medium text-zinc-900 transition-colors duration-200 hover:border-zinc-400 hover:bg-white"
+              onClick={() => {
+                if (typeof window !== "undefined") {
+                  window.localStorage.setItem(FIRST_SYSTEM_MOMENT_STORAGE_KEY, "1");
+                }
+                setFirstSystemMomentOpen(false);
+              }}
+            >
+              Continue
+            </button>
+          </div>
         </div>
       )}
       <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-10">
         <section className="w-full max-w-md">
+          <div className="mb-8 border-b border-zinc-800/60 pb-8">
+            <h1 className="text-2xl font-semibold leading-tight tracking-tight text-zinc-50 md:text-[1.65rem]">{HOME_HERO_HEADLINE}</h1>
+            <p className="mt-3 text-sm leading-relaxed text-zinc-500">{HOME_HERO_SUBHEADLINE}</p>
+          </div>
           <header className="mb-8 border-b border-zinc-800/90 pb-8">
+            <div className="mb-6 border-b border-zinc-800/50 pb-5">
+              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-600">System Integrity</p>
+              <p className="mt-1.5 flex flex-wrap items-baseline gap-x-2 text-sm tabular-nums">
+                <span className="font-medium text-zinc-200">{systemIntegrityScore}</span>
+                <span className="text-zinc-600">/</span>
+                <span className="text-zinc-600">100</span>
+                <span className="text-zinc-600">·</span>
+                <span
+                  className={
+                    systemIntegrityScore >= 60 ? "text-xs font-medium text-zinc-500" : "text-xs font-medium text-amber-500/85"
+                  }
+                >
+                  {getIntegrityStatusLabel(systemIntegrityScore)}
+                </span>
+              </p>
+            </div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-400/90">Strength System Active</p>
-            <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <p className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">Level {level}</p>
-              <p className="text-sm text-zinc-500">{getCurrentRank(level)}</p>
+            <div className="mt-3 space-y-1">
+              <p className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">Strength Level {level}</p>
+              <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-zinc-600">
+                Rank · <span className="text-zinc-400">{strengthRank}</span>
+              </p>
             </div>
             <div className="mt-5">
               <div className="flex items-center justify-between text-xs text-zinc-500">
@@ -1270,35 +1468,39 @@ export default function Dashboard() {
                 );
               })()}
             </div>
-            <p className="mt-4 text-[11px] leading-relaxed text-zinc-500">
-              System Integrity:{" "}
-              <span className="tabular-nums text-zinc-400">{systemIntegrityScore}%</span>
-              <span className="text-zinc-600"> · {getIntegrityStatusLabel(systemIntegrityScore)}</span>
-            </p>
-            {(() => {
-              const streakLine = formatStreakIdentityLine(currentStreak);
-              return streakLine ? (
-                <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">{streakLine}</p>
-              ) : null;
-            })()}
           </header>
 
-          {isPaidReady && !isPaidUser && level >= FREE_MAX_PATH_LEVEL && (
-            <div className="mb-5 rounded-lg border border-zinc-800/80 bg-zinc-900/35 px-3 py-2.5">
-              <p className="text-[11px] leading-relaxed text-zinc-500">
-                {UPGRADE_LIMIT_MESSAGE}.{" "}
-                <a
-                  href={GUMROAD_ASCEND_CHECKOUT_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline"
-                >
-                  Get Early Access on Gumroad
-                </a>
-              </p>
-              <div className="mt-2 border-t border-zinc-800/50 pt-2">
-                <RefreshAccessButton />
-              </div>
+          <div className="mb-5 space-y-1.5 rounded-lg border border-zinc-800/60 bg-zinc-950/30 px-3 py-2.5">
+            {completed[0] && dailyQuests.length > 0 && (
+              <p className="text-[11px] leading-relaxed text-zinc-500">{formatNextSessionAvailableLine(expiryMs)}</p>
+            )}
+            {xpToNextRetentionLine && (
+              <p className="text-[11px] leading-relaxed text-zinc-500">{xpToNextRetentionLine}</p>
+            )}
+            <p className="text-[11px] leading-relaxed text-zinc-500">{formatWeeklyGoalLine(weeklySessionsCount)}</p>
+            <p className="text-[10px] leading-relaxed text-zinc-600">{STAY_CONSISTENT_REMINDER}</p>
+          </div>
+
+          {baselineFeedback.length > 0 && (
+            <div className="mb-5 space-y-1.5 rounded-lg border border-emerald-900/35 bg-emerald-950/15 px-3 py-2.5">
+              {baselineFeedback.map((line) => (
+                <p key={line} className="text-[11px] leading-relaxed text-emerald-400/90">
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {isPaidReady && !isPaidUser && (
+            <div className="mb-5">
+              <ProLockedCard
+                variant="compact"
+                notice={
+                  level >= FREE_MAX_PATH_LEVEL ? (
+                    <p className="text-[11px] leading-relaxed text-amber-500/85">{UPGRADE_LIMIT_MESSAGE}</p>
+                  ) : null
+                }
+              />
             </div>
           )}
 
@@ -1314,32 +1516,79 @@ export default function Dashboard() {
               Until Level {SPLIT_TRAINING_UNLOCK_LEVEL}, each training day uses a full-body protocol.
             </p>
           )}
-          {(() => {
-            const nextUnlock = getNextStrengthUnlock(
-              STRENGTH_PATH_ID,
-              effectiveLevelForPathUnlocks(
-                getPathLevelFromXp(trainingXpState.strength?.xp ?? 0),
-                effectivePro
-              )
-            );
-            if (!nextUnlock) return null;
-            return (
-              <p className="mb-4 text-[11px] leading-relaxed text-zinc-500">
-                Unlock required to progress further — reach Level {nextUnlock.levelRequirement} for {nextUnlock.title}.
-              </p>
-            );
-          })()}
+          {nextStrengthUnlock && (
+            <div className="mb-4 space-y-2 border-b border-zinc-800/60 pb-4">
+              {unlockAnticipation && (
+                <p className="text-[11px] font-medium leading-relaxed text-zinc-300">{unlockAnticipation}</p>
+              )}
+              <p className="text-[11px] leading-relaxed text-zinc-500">{unlockLevelPreviewLine(nextStrengthUnlock)}</p>
+            </div>
+          )}
 
-          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's training protocol</h2>
+          {furtherLockedUnlocks.length > 0 && (
+            <div className="mb-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-600">Also coming</p>
+              <ul className="mt-2 space-y-2">
+                {furtherLockedUnlocks.map((u) => (
+                  <li
+                    key={`${u.title}-${u.levelRequirement}`}
+                    className="rounded-lg border border-zinc-800/90 bg-zinc-950/50 px-3 py-2 opacity-[0.82]"
+                  >
+                    <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-600">
+                      Level {u.levelRequirement} · {u.title}
+                    </p>
+                    <p className="mt-1 text-[11px] leading-snug text-zinc-600">{lockedPathTeaser(u)}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {dailyQuests.length > 0 && !completed[0] && (
+            <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-3">
+              <p className="text-[11px] font-medium text-zinc-300">How do you feel today?</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(["fresh", "normal", "tired"] as const).map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => {
+                      setDailyReadiness(r);
+                      saveReadinessForDate(getLocalDateKey(), r);
+                    }}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      dailyReadiness === r
+                        ? "border-emerald-500/45 bg-emerald-950/25 text-emerald-100/95"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
+                    }`}
+                  >
+                    {r === "fresh" ? "Fresh" : r === "normal" ? "Normal" : "Tired"}
+                  </button>
+                ))}
+              </div>
+              {(dailyReadiness === "fresh" || dailyReadiness === "tired") && (
+                <p className="mt-2 text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
+              )}
+            </div>
+          )}
+
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's Training Protocol</h2>
+          {protocolBaselineLine && (
+            <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">{protocolBaselineLine}</p>
+          )}
           <div className="mb-4 space-y-2">
+            {pressureStreakLine && (
+              <p className="text-[11px] leading-relaxed text-zinc-500">{pressureStreakLine}</p>
+            )}
             {yesterdayDailyMissed && (
-              <p className="text-[11px] leading-relaxed text-amber-500/85">{"You missed today's session"}</p>
+              <p className="text-[11px] leading-relaxed text-amber-500/80">{MISSED_YESTERDAY_SESSION}</p>
             )}
             {dailyQuests.length > 0 && !completed[0] && (
-              <p className="text-[11px] text-zinc-500">
-                {"Today's Protocol expires in "}
-                {formatExpiresInHoursLabel(expiryMs)}
-              </p>
+              <>
+                <p className="text-[11px] leading-relaxed text-zinc-500">{trainingProtocolExpirySentence(expiryMs)}</p>
+                <p className="text-[11px] leading-relaxed text-zinc-600">{URGENCY_MAINTAIN_SYSTEM}</p>
+                <p className="text-[10px] leading-relaxed text-zinc-600/75">{INTEGRITY_PRESSURE_HINT}</p>
+              </>
             )}
           </div>
           {yesterdayDailyMissed && yesterdayProtocolTitle && (
@@ -1349,32 +1598,22 @@ export default function Dashboard() {
             </div>
           )}
           <ul className="flex flex-col gap-4">
-            {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
+            {dailyQuests.map((quest, idx) =>
+              renderProtocolBlock(
+                idx === 0 ? applyReadinessAdjustments(quest, dailyReadiness) : quest,
+                { kind: "daily", idx }
+              )
+            )}
           </ul>
           {dailyQuests.length > 0 && completed[0] && !trainingSessionOpen && (
             <div className="mt-6">
-              {effectivePro ? (
-                <button
-                  type="button"
-                  onClick={openTrainingSession}
-                  className="w-full rounded-xl border border-emerald-500/25 bg-emerald-950/15 py-3 text-sm font-semibold text-emerald-100/95 transition-colors hover:border-emerald-400/40 hover:bg-emerald-950/30"
-                >
-                  Continue training
-                </button>
-              ) : (
-                <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/35 px-4 py-4 text-center">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">Pro</p>
-                  <p className="mt-2 text-sm text-zinc-400">Extra training session is locked.</p>
-                  <a
-                    href={GUMROAD_ASCEND_CHECKOUT_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="mt-3 inline-block text-xs font-medium text-zinc-300 underline-offset-2 hover:text-zinc-100 hover:underline"
-                  >
-                    Get Early Access on Gumroad
-                  </a>
-                </div>
-              )}
+              <button
+                type="button"
+                onClick={() => (effectivePro ? openTrainingSession() : setProConversionModalOpen(true))}
+                className="w-full rounded-xl border border-emerald-500/25 bg-emerald-950/15 py-3 text-sm font-semibold text-emerald-100/95 transition-colors hover:border-emerald-400/40 hover:bg-emerald-950/30"
+              >
+                Continue training
+              </button>
             </div>
           )}
           {trainingSessionOpen && (

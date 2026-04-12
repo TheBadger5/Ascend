@@ -5,7 +5,7 @@
 
 import { maxXpForLevel } from "./progression-gate";
 
-/** Gumroad product — Early Access checkout (opens in a new tab from Upgrade CTAs). */
+/** Gumroad product — Early Access checkout (only legitimate paid unlock path in the app). */
 export const GUMROAD_ASCEND_CHECKOUT_URL = "https://skillstacked.gumroad.com/l/ascend";
 
 /** Free tier stops at this path level (XP cannot exceed max for this level). */

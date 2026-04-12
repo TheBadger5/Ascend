@@ -16,6 +16,15 @@ create table if not exists public.profiles (
 -- Existing databases: add column if missing
 alter table public.profiles add column if not exists is_paid_user boolean not null default false;
 
+-- Baseline (Day 1) + latest self-reported metrics for progression feedback
+alter table public.profiles add column if not exists pushups_max integer;
+alter table public.profiles add column if not exists squats_max integer;
+alter table public.profiles add column if not exists plank_time integer;
+alter table public.profiles add column if not exists current_pushups_max integer;
+alter table public.profiles add column if not exists current_squats_max integer;
+alter table public.profiles add column if not exists current_plank_time integer;
+alter table public.profiles add column if not exists baseline_completed_at timestamp with time zone;
+
 create table if not exists public.daily_tasks (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
