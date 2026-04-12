@@ -18,9 +18,9 @@ import {
   improvementLines,
   maybeRefreshWeekSnapshot,
 } from "@/lib/baseline-metrics";
+import { saveBaselineOverlay } from "@/lib/baseline-local-overlay";
 import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
 import { useProEntitlement } from "@/lib/use-pro-entitlement";
-import { supabase } from "@/lib/supabase";
 import FreeVsProComparison from "@/components/free-vs-pro-comparison";
 import ProLockedCard from "@/components/pro-locked-card";
 import { getPathUnlocks } from "@/lib/path-unlocks";
@@ -111,19 +111,12 @@ export default function ProgressPage() {
     }
     setSavingMetrics(true);
     setMetricsMessage(null);
-    const { error } = await supabase
-      .from("profiles")
-      .update({
-        current_pushups_max: pu,
-        current_squats_max: sq,
-        current_plank_time: pl,
-      })
-      .eq("id", profile.id);
+    saveBaselineOverlay(profile.id, {
+      current_pushups_max: pu,
+      current_squats_max: sq,
+      current_plank_time: pl,
+    });
     setSavingMetrics(false);
-    if (error) {
-      setMetricsMessage(error.message);
-      return;
-    }
     const updated: ProfileRow = {
       ...profile,
       current_pushups_max: pu,

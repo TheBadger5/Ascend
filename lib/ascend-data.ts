@@ -1,5 +1,7 @@
 "use client";
 
+import { loadBaselineOverlay } from "@/lib/baseline-local-overlay";
+import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 
 export type ProfileRow = {
@@ -45,10 +47,42 @@ export const getCurrentUser = async () => {
   return user;
 };
 
+function mergeBaselineOverlay(userId: string, row: ProfileRow): ProfileRow {
+  const overlay = loadBaselineOverlay(userId);
+  if (!overlay) return row;
+  return { ...row, ...overlay };
+}
+
+/** Only columns guaranteed on minimal `profiles` before baseline migrations (PostgREST rejects unknown keys). */
+function coreProfileUpsertPayload(userId: string) {
+  return {
+    id: userId,
+    total_xp: 0,
+    level: 1,
+    current_streak: 0,
+    best_streak: 0,
+    is_paid_user: false,
+  };
+}
+
 export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> => {
+  logProfileTableDebug("ascend-data:getOrCreateProfile", "select", {
+    query: 'from("profiles").select("*").eq("id", userId).single()',
+  });
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).single();
   if (!error && data) {
-    return data as ProfileRow;
+    const base = data as ProfileRow;
+    const withDefaults: ProfileRow = {
+      ...base,
+      pushups_max: base.pushups_max ?? null,
+      squats_max: base.squats_max ?? null,
+      plank_time: base.plank_time ?? null,
+      current_pushups_max: base.current_pushups_max ?? null,
+      current_squats_max: base.current_squats_max ?? null,
+      current_plank_time: base.current_plank_time ?? null,
+      baseline_completed_at: base.baseline_completed_at ?? null,
+    };
+    return mergeBaselineOverlay(userId, withDefaults);
   }
   const fallback: ProfileRow = {
     id: userId,
@@ -65,6 +99,11 @@ export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> =>
     current_plank_time: null,
     baseline_completed_at: null,
   };
-  await supabase.from("profiles").upsert(fallback);
-  return fallback;
+  const upsertPayload = coreProfileUpsertPayload(userId);
+  logProfileTableDebug("ascend-data:getOrCreateProfile", "upsert", {
+    query: 'from("profiles").upsert(corePayload)',
+    upsertKeys: Object.keys(upsertPayload),
+  });
+  await supabase.from("profiles").upsert(upsertPayload);
+  return mergeBaselineOverlay(userId, fallback);
 };

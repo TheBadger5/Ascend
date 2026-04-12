@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { saveBaselineOverlay } from "@/lib/baseline-local-overlay";
 import { getWeekKey, saveWeekSnapshot } from "@/lib/baseline-metrics";
-import { supabase } from "@/lib/supabase";
 
 type Props = {
   userId: string;
@@ -10,7 +10,8 @@ type Props = {
 };
 
 /**
- * Day 1: Baseline Session — max reps tests stored on `profiles` (pushups_max, squats_max, plank_time).
+ * Day 1: Baseline Session — push/squat maxes on `profiles`; optional plank is kept in local week snapshot
+ * when `plank_time` / `current_plank_time` columns are absent from Supabase.
  */
 export default function BaselineSession({ userId, onComplete }: Props) {
   const [pushups, setPushups] = useState("");
@@ -39,23 +40,16 @@ export default function BaselineSession({ userId, onComplete }: Props) {
     setError(null);
     setSaving(true);
     const now = new Date().toISOString();
-    const { error: upErr } = await supabase
-      .from("profiles")
-      .update({
-        pushups_max: p,
-        squats_max: s,
-        plank_time: pl,
-        current_pushups_max: p,
-        current_squats_max: s,
-        current_plank_time: pl,
-        baseline_completed_at: now,
-      })
-      .eq("id", userId);
+    saveBaselineOverlay(userId, {
+      pushups_max: p,
+      squats_max: s,
+      plank_time: pl,
+      current_pushups_max: p,
+      current_squats_max: s,
+      current_plank_time: pl,
+      baseline_completed_at: now,
+    });
     setSaving(false);
-    if (upErr) {
-      setError(upErr.message);
-      return;
-    }
     saveWeekSnapshot({ weekKey: getWeekKey(), pushups: p, squats: s, plank: pl });
     onComplete();
   };

@@ -1,5 +1,6 @@
 "use client";
 
+import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 import { getCurrentUser } from "./ascend-data";
 
@@ -31,6 +32,9 @@ export async function fetchPaidAccessState(): Promise<PaidAccessFetchResult> {
       };
     }
 
+    logProfileTableDebug("paid-access:fetchPaidAccessState", "select", {
+      query: 'from("profiles").select("id, is_paid_user").eq("id", user.id).maybeSingle()',
+    });
     const { data, error } = await supabase
       .from("profiles")
       .select("id, is_paid_user")

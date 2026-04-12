@@ -76,6 +76,7 @@ import {
   recordProtocolComplete,
   saveSystemIntegrityState,
 } from "@/lib/system-integrity";
+import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 import { logUserEvent, USER_EVENT_TYPES } from "@/lib/user-events";
 import ProLockedCard from "@/components/pro-locked-card";
@@ -511,6 +512,10 @@ export default function Dashboard() {
         }
 
         if (nextStreak !== profile.current_streak) {
+          logProfileTableDebug("page:loadStreakReconcile", "update", {
+            query: 'from("profiles").update({ current_streak }).eq("id", user.id)',
+            updateKeys: ["current_streak"],
+          });
           await supabase.from("profiles").update({ current_streak: nextStreak }).eq("id", user.id);
         }
         setCurrentStreak(nextStreak);
@@ -807,6 +812,10 @@ export default function Dashboard() {
       const nextBest = Math.max(bestStreak, nextStreak);
       setCurrentStreak(nextStreak);
       setBestStreak(nextBest);
+      logProfileTableDebug("page:completeDailyAllTasks", "update", {
+        query: 'from("profiles").update({ current_streak, best_streak }).eq("id", userId)',
+        updateKeys: ["current_streak", "best_streak"],
+      });
       await supabase
         .from("profiles")
         .update({ current_streak: nextStreak, best_streak: nextBest })

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { usePaidAccess } from "@/lib/paid-access-provider";
+import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 import LogoutButton from "./logout-button";
 
@@ -34,6 +35,9 @@ export default function TopNav() {
           return;
         }
         setIsAuthenticated(true);
+        logProfileTableDebug("top-nav:syncAuthAndUnlocks", "select", {
+          query: 'from("profiles").select("level").eq("id", session.user.id).single()',
+        });
         const { data: profile } = await supabase
           .from("profiles")
           .select("level")
