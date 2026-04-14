@@ -486,6 +486,7 @@ export default function Dashboard() {
   const [trainingLevel, setTrainingLevel] = useState<TrainingLevel>("intermediate");
   const [trainingLevelSaving, setTrainingLevelSaving] = useState(false);
   const [trainingLevelNotice, setTrainingLevelNotice] = useState<string | null>(null);
+  const pendingTrainingLevelSyncRef = useRef<TrainingLevel | null>(null);
   const [recentlyCompletedIds, setRecentlyCompletedIds] = useState<Record<number, boolean>>({});
   const [recentlyCompletedPathGain, setRecentlyCompletedPathGain] = useState<Record<number, string>>({});
   const [protocolCompletionFeedback, setProtocolCompletionFeedback] = useState<{
@@ -572,16 +573,31 @@ export default function Dashboard() {
           if (supabaseTrainingLevel) {
             if (localStoredLevel && localStoredLevel !== supabaseTrainingLevel) {
               console.log(
-                "[TRAINING LEVEL DEBUG] Overwrite local with Supabase:",
-                localStoredLevel,
+                "[TRAINING LEVEL DEBUG] Overwrite Supabase with Local:",
+                supabaseTrainingLevel,
                 "->",
-                supabaseTrainingLevel
+                localStoredLevel
               );
+              resolvedTrainingLevel = localStoredLevel;
+              const { error: levelSyncError } = await supabase
+                .from("profiles")
+                .update({ training_level: localStoredLevel })
+                .eq("id", user.id);
+              if (levelSyncError) {
+                console.warn("[TRAINING LEVEL DEBUG] Failed to sync local level to Supabase:", levelSyncError.message);
+              }
+            } else {
+              resolvedTrainingLevel = supabaseTrainingLevel;
             }
-            resolvedTrainingLevel = supabaseTrainingLevel;
           } else if (localStoredLevel) {
             console.log("[TRAINING LEVEL DEBUG] Migrating local level to Supabase:", localStoredLevel);
-            await supabase.from("profiles").update({ training_level: localStoredLevel }).eq("id", user.id);
+            const { error: levelMigrateError } = await supabase
+              .from("profiles")
+              .update({ training_level: localStoredLevel })
+              .eq("id", user.id);
+            if (levelMigrateError) {
+              console.warn("[TRAINING LEVEL DEBUG] Failed to migrate local level to Supabase:", levelMigrateError.message);
+            }
           } else {
             console.log("[TRAINING LEVEL DEBUG] No stored level found; defaulting to intermediate.");
           }
@@ -1333,20 +1349,50 @@ export default function Dashboard() {
     setTrainingLevelSaving(true);
     try {
       if (userId) {
-        await supabase.from("profiles").update({ training_level: nextLevel }).eq("id", userId);
-        console.log("[TRAINING LEVEL DEBUG] Supabase level saved:", nextLevel);
+        const { error: saveError } = await supabase.from("profiles").update({ training_level: nextLevel }).eq("id", userId);
+        if (saveError) {
+          console.warn("[TRAINING LEVEL DEBUG] Supabase save failed:", saveError.message);
+          pendingTrainingLevelSyncRef.current = nextLevel;
+          setTrainingLevelNotice("Saved locally. Cloud sync pending.");
+        } else {
+          console.log("[TRAINING LEVEL DEBUG] Supabase level saved:", nextLevel);
+        }
+      } else {
+        pendingTrainingLevelSyncRef.current = nextLevel;
+        console.log("[TRAINING LEVEL DEBUG] No user yet; queued level sync:", nextLevel);
       }
       if (opts?.applyToToday) {
         await regenerateTodaySessionForTrainingLevel(nextLevel);
-        setTrainingLevelNotice("Applied to today's session.");
+        setTrainingLevelNotice((prev) => prev ?? "Applied to today's session.");
       } else {
-        setTrainingLevelNotice("Applies to your next generated session.");
+        setTrainingLevelNotice((prev) => prev ?? "Applies to your next generated session.");
       }
       window.setTimeout(() => setTrainingLevelNotice(null), 2600);
     } finally {
       setTrainingLevelSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (!userId || !pendingTrainingLevelSyncRef.current) return;
+    let cancelled = false;
+    const syncPendingLevel = async () => {
+      const pendingLevel = pendingTrainingLevelSyncRef.current;
+      if (!pendingLevel) return;
+      const { error } = await supabase.from("profiles").update({ training_level: pendingLevel }).eq("id", userId);
+      if (cancelled) return;
+      if (error) {
+        console.warn("[TRAINING LEVEL DEBUG] Pending sync failed:", error.message);
+        return;
+      }
+      console.log("[TRAINING LEVEL DEBUG] Pending sync succeeded:", pendingLevel);
+      pendingTrainingLevelSyncRef.current = null;
+    };
+    void syncPendingLevel();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   const canUndoQuestCompletion = (questId: number) => {
     if (!undoCompletion || undoCompletion.dateKey !== getLocalDateKey()) return false;
