@@ -4,10 +4,14 @@ export type TrainingLevel = "beginner" | "intermediate" | "advanced";
 
 export const TRAINING_LEVEL_STORAGE_KEY = "ascend.training-level.v1";
 
-export function normalizeTrainingLevel(raw: unknown): TrainingLevel {
+export function parseTrainingLevel(raw: unknown): TrainingLevel | null {
   const v = String(raw ?? "").toLowerCase();
-  if (v === "beginner" || v === "advanced") return v;
-  return "intermediate";
+  if (v === "beginner" || v === "intermediate" || v === "advanced") return v;
+  return null;
+}
+
+export function normalizeTrainingLevel(raw: unknown): TrainingLevel {
+  return parseTrainingLevel(raw) ?? "intermediate";
 }
 
 export function trainingLevelLabel(level: TrainingLevel): string {

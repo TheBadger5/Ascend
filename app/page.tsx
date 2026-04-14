@@ -39,7 +39,6 @@ import {
 import {
   applySessionVolumeScale,
   getGymSessionForDate,
-  getGymSessionRefreshForDate,
   getTodayTrainingHeadline,
   identifyGymSessionForDateAndSteps,
   toExerciseStep,
@@ -138,7 +137,7 @@ import {
   persistStrengthXpToSupabase,
 } from "@/lib/strength-xp-sync";
 import {
-  normalizeTrainingLevel,
+  parseTrainingLevel,
   progressionSpeedForTrainingLevel,
   TRAINING_LEVEL_STORAGE_KEY,
   trainingLevelLabel,
@@ -153,7 +152,6 @@ const ONBOARDING_STEPS = [
 ] as const;
 const STRENGTH_PATH_ID = STRENGTH_UNLOCK_PATH_ID;
 const formatStrengthXpGain = (xp: number) => `+${xp} Strength XP`;
-const FREE_DAILY_REFRESH_LIMIT = 1;
 const COMPOUND_LIFT_KEYWORDS = [
   "squat",
   "deadlift",
@@ -514,7 +512,6 @@ export default function Dashboard() {
   const [systemIntegrityScore, setSystemIntegrityScore] = useState(100);
   const [dailyReadiness, setDailyReadiness] = useState<ReadinessLevel>("normal");
   const [weeklySessionsCount, setWeeklySessionsCount] = useState(0);
-  const [dailyRefreshCount, setDailyRefreshCount] = useState(0);
   const [weeklyStrengthStats, setWeeklyStrengthStats] = useState<{ totalVolume: number; strongestLift: string | null }>({
     totalVolume: 0,
     strongestLift: null,
@@ -532,7 +529,6 @@ export default function Dashboard() {
   const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
   const [proConversionModalOpen, setProConversionModalOpen] = useState(false);
   const [firstSystemMomentOpen, setFirstSystemMomentOpen] = useState(false);
-  const refreshesLeftToday = Math.max(0, FREE_DAILY_REFRESH_LIMIT - dailyRefreshCount);
 
   useEffect(() => {
     if (effectivePro && proConversionModalOpen) {
@@ -547,10 +543,11 @@ export default function Dashboard() {
         setXpResolved(false);
         setUndoCompletion(null);
         setOptionalConditioningDone(false);
-        const storedLevel = window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY);
-        if (storedLevel) {
-          setTrainingLevel(normalizeTrainingLevel(storedLevel));
-        }
+        const storedLevelRaw = window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY);
+        const localStoredLevel = parseTrainingLevel(storedLevelRaw);
+        console.log("[TRAINING LEVEL DEBUG] Supabase level: pending");
+        console.log("[TRAINING LEVEL DEBUG] LocalStorage level:", localStoredLevel);
+        let resolvedTrainingLevel: TrainingLevel = localStoredLevel ?? "intermediate";
         const hasCompletedOnboarding = window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
         if (!hasCompletedOnboarding) {
           setShowOnboarding(true);
@@ -570,13 +567,31 @@ export default function Dashboard() {
           const supabaseBacked = await loadSupabaseBackedStrengthXp(user.id, normalizedXp);
           normalizedXp = supabaseBacked.state;
           profile = supabaseBacked.profile;
-          const profileTrainingLevel = normalizeTrainingLevel(supabaseBacked.profile.training_level);
-          setTrainingLevel(profileTrainingLevel);
-          window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, profileTrainingLevel);
+          const supabaseTrainingLevel = parseTrainingLevel(supabaseBacked.profile.training_level);
+          console.log("[TRAINING LEVEL DEBUG] Supabase level:", supabaseTrainingLevel);
+          if (supabaseTrainingLevel) {
+            if (localStoredLevel && localStoredLevel !== supabaseTrainingLevel) {
+              console.log(
+                "[TRAINING LEVEL DEBUG] Overwrite local with Supabase:",
+                localStoredLevel,
+                "->",
+                supabaseTrainingLevel
+              );
+            }
+            resolvedTrainingLevel = supabaseTrainingLevel;
+          } else if (localStoredLevel) {
+            console.log("[TRAINING LEVEL DEBUG] Migrating local level to Supabase:", localStoredLevel);
+            await supabase.from("profiles").update({ training_level: localStoredLevel }).eq("id", user.id);
+          } else {
+            console.log("[TRAINING LEVEL DEBUG] No stored level found; defaulting to intermediate.");
+          }
           if (supabaseBacked.migratedFromLocal) {
             console.log("[XP DEBUG] migrated local XP to Supabase for user:", user.id);
           }
         }
+        setTrainingLevel(resolvedTrainingLevel);
+        window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, resolvedTrainingLevel);
+        console.log("[TRAINING LEVEL DEBUG] Final level used:", resolvedTrainingLevel);
         if (!resolvedPaid) {
           const cap = getMaxXpForFreeTier();
           if (normalizedXp.strength.xp > cap) {
@@ -599,7 +614,6 @@ export default function Dashboard() {
         setXpResolved(true);
 
         if (!user) {
-          setDailyRefreshCount(0);
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
           return;
         }
@@ -653,7 +667,15 @@ export default function Dashboard() {
           );
           const firstTitle = singleTasks[0]?.title ?? singleTasks[0]?.task ?? "";
           if (!resolvedPaid && firstTitle && strengthTaskTitleIsProOnly(firstTitle)) {
-            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false, weeklyVolume, null, trainingLevel);
+            const regenerated = createDailyQuests(
+              previousTasks,
+              trainingXpForDaily,
+              today,
+              false,
+              weeklyVolume,
+              null,
+              resolvedTrainingLevel
+            );
             singleTasks = regenerated;
             singleCompleted = Array.from({ length: regenerated.length }, () => false);
             await supabase
@@ -664,7 +686,6 @@ export default function Dashboard() {
           setDailyTaskId(String(todayRow.id));
           setDailyQuests(singleTasks);
           setCompleted(singleCompleted);
-          setDailyRefreshCount(Number(todayRow.daily_refresh_count ?? 0));
           if (
             JSON.stringify(singleTasks) !== JSON.stringify(todayRow.tasks) ||
             JSON.stringify(singleCompleted) !== JSON.stringify(todayRow.completed)
@@ -682,7 +703,7 @@ export default function Dashboard() {
             resolvedPaid,
             weeklyVolume,
             null,
-            trainingLevel
+            resolvedTrainingLevel
           );
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
@@ -692,14 +713,12 @@ export default function Dashboard() {
               date: today,
               tasks: generated,
               completed: initialCompleted,
-              daily_refresh_count: 0,
             })
             .select("id")
             .single();
           setDailyTaskId(inserted?.id ? String(inserted.id) : null);
           setDailyQuests(generated);
           setCompleted(initialCompleted);
-          setDailyRefreshCount(0);
         }
 
         if (nextStreak !== profile.current_streak) {
@@ -1275,36 +1294,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleRefreshDailySession = async () => {
-    if (!userId || !dailyTaskId || dailyQuests.length === 0 || completed[0] || refreshesLeftToday <= 0) return;
-    const today = getLocalDateKey();
-    const [y, m, d] = today.split("-").map(Number);
-    const localDate = new Date(y, m - 1, d);
-    const currentQuest = dailyQuests[0];
-    const currentSession = identifyGymSessionForDateAndSteps(localDate, currentQuest.steps);
-    const replacementBase = getGymSessionRefreshForDate(
-      localDate,
-      currentSession?.id ?? getGymSessionForDate(localDate).id
-    );
-    const weekMon = mondayDateKeyForLocalWeekContaining(today);
-    const weekSun = sundayDateKeyFromMonday(weekMon);
-    const weekVolumeRows = await fetchExerciseVolumeRowsForRange(userId, weekMon, weekSun);
-    const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
-    const refreshed = createDailyQuests([], trainingXpState, today, effectivePro, weeklyVolume, replacementBase, trainingLevel);
-    const currentSteps = JSON.stringify(currentQuest.steps);
-    const nextSteps = JSON.stringify(refreshed[0]?.steps ?? []);
-    if (currentSteps === nextSteps) return;
-    const nextRefreshCount = dailyRefreshCount + 1;
-    setDailyQuests(refreshed);
-    setDailyRefreshCount(nextRefreshCount);
-    setExpandedQuestIds({});
-    setProtocolStepChecks({});
-    await supabase
-      .from("daily_tasks")
-      .update({ tasks: refreshed, daily_refresh_count: nextRefreshCount })
-      .eq("id", dailyTaskId);
-  };
-
   const regenerateTodaySessionForTrainingLevel = async (nextLevel: TrainingLevel) => {
     if (!userId || !dailyTaskId || dailyQuests.length === 0 || completed[0]) return;
     const today = getLocalDateKey();
@@ -1333,14 +1322,19 @@ export default function Dashboard() {
 
   const updateTrainingLevelSetting = async (nextLevel: TrainingLevel, opts?: { applyToToday?: boolean }) => {
     if (trainingLevelSaving) return;
+    if (trainingLevel !== nextLevel) {
+      console.log("[TRAINING LEVEL DEBUG] User level change:", trainingLevel, "->", nextLevel);
+    }
     setTrainingLevel(nextLevel);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, nextLevel);
+      console.log("[TRAINING LEVEL DEBUG] LocalStorage level saved:", nextLevel);
     }
     setTrainingLevelSaving(true);
     try {
       if (userId) {
         await supabase.from("profiles").update({ training_level: nextLevel }).eq("id", userId);
+        console.log("[TRAINING LEVEL DEBUG] Supabase level saved:", nextLevel);
       }
       if (opts?.applyToToday) {
         await regenerateTodaySessionForTrainingLevel(nextLevel);
@@ -2233,22 +2227,6 @@ export default function Dashboard() {
             </p>
             <p className="text-[10px] text-zinc-600">Your system is evolving.</p>
           </div>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <p className="text-[10px] text-zinc-500">Refreshes left today: {refreshesLeftToday}</p>
-            <button
-              type="button"
-              onClick={() => void handleRefreshDailySession()}
-              disabled={refreshesLeftToday <= 0 || completed[0] || dailyQuests.length === 0}
-              className={`rounded-full border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] transition-colors ${
-                refreshesLeftToday <= 0 || completed[0] || dailyQuests.length === 0
-                  ? "cursor-not-allowed border-zinc-800 bg-zinc-900 text-zinc-600"
-                  : "border-zinc-600 bg-zinc-900 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100"
-              }`}
-            >
-              Refresh Session
-            </button>
-          </div>
-          {refreshesLeftToday <= 0 && <p className="mb-3 text-[10px] text-zinc-600">No refreshes left today.</p>}
           <p className="mb-1 text-[11px] leading-relaxed text-zinc-500">
             This session works by progressive overload: add a little more load, reps, or quality over time.
           </p>
