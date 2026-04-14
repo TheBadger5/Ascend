@@ -40,13 +40,16 @@ export default function UpgradePage() {
           <ProLockedCard variant="standard">
             <div className="space-y-4">
               <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-600">Free vs Pro</p>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
+                  Free vs Unlock Full System
+                </p>
                 <div className="mt-2">
                   <FreeVsProComparison />
                 </div>
               </div>
               <p className="text-[11px] leading-relaxed text-zinc-600">
-                Pro also removes the Level {FREE_MAX_PATH_LEVEL} XP cap, enables path effects beyond that tier, uses the full weekly rotation when you have earned it, faster level-ups (2 vs 3 sessions), and the extra training block after your daily protocol.
+                Unlock Full System removes the Level {FREE_MAX_PATH_LEVEL} XP cap, unlocks deeper programming layers, and
+                adds faster progression pacing after your daily protocol.
               </p>
             </div>
           </ProLockedCard>

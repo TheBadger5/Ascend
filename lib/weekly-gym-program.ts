@@ -22,6 +22,8 @@ export type GymSession = {
   exercises: GymExercise[];
 };
 
+type DaySplitKey = "upper_push" | "lower" | "recovery" | "upper_pull" | "lower_full" | "optional";
+
 const mondayUpperPush: GymSession = {
   id: "day-1-upper-push",
   title: "Day 1 — Upper (Push Focus)",
@@ -138,6 +140,96 @@ const sundayRecovery: GymSession = {
   ],
 };
 
+const mondayUpperPushAlt: GymSession = {
+  ...mondayUpperPush,
+  id: "day-1-upper-push-alt",
+  instruction: "Pressing priority with pull balance. Use alternate pressing angles to keep progress moving.",
+  exercises: [
+    { name: "Incline Barbell Bench Press", sets: "4", reps: "5-8", rest: "2-3 min" },
+    { name: "Seated Cable Row", sets: "3", reps: "6-10", rest: "2 min" },
+    { name: "Seated Dumbbell Shoulder Press", sets: "3", reps: "6-8", rest: "2-3 min" },
+    { name: "Machine Chest Press", sets: "3", reps: "8-12", rest: "90-120 sec" },
+    { name: "Cable Lateral Raise", sets: "3", reps: "12-15", rest: "60-90 sec" },
+    { name: "Overhead Triceps Extension", sets: "2-3", reps: "10-12", rest: "90 sec" },
+  ],
+};
+
+const tuesdayLowerAlt: GymSession = {
+  ...tuesdayLower,
+  id: "day-2-lower-alt",
+  instruction: "Lower-body focus with machine + unilateral emphasis to keep pattern quality high.",
+  exercises: [
+    { name: "Front Squat", sets: "4", reps: "5-8", rest: "2-3 min" },
+    { name: "Hip Thrust", sets: "3", reps: "6-10", rest: "2 min" },
+    { name: "Hack Squat", sets: "3", reps: "8-12", rest: "90-120 sec" },
+    { name: "Reverse Lunge", sets: "3", reps: "8-12 / leg", rest: "90 sec" },
+    { name: "Seated Calf Raise", sets: "3", reps: "12-15", rest: "60-90 sec" },
+  ],
+};
+
+const wednesdayRecoveryAlt: GymSession = {
+  ...wednesdayRecovery,
+  id: "day-3-recovery-alt",
+  exercises: [
+    { name: "Leg Press (Light)", sets: "3", reps: "10-12", rest: "90 sec" },
+    { name: "Single-Leg Romanian Deadlift", sets: "3", reps: "8-10", rest: "90-120 sec" },
+    { name: "Machine Incline Press", sets: "3", reps: "8-12", rest: "90 sec" },
+    { name: "Lat Pulldown (Controlled)", sets: "3", reps: "8-12", rest: "90 sec" },
+    { name: "Optional: Easy Bike", sets: "1", reps: "15-20 min", rest: "n/a" },
+    { name: "Optional: Thoracic Mobility", sets: "1-2", reps: "8-10 / side", rest: "45 sec" },
+  ],
+};
+
+const thursdayUpperPullAlt: GymSession = {
+  ...thursdayUpperPull,
+  id: "day-4-upper-pull-alt",
+  exercises: [
+    { name: "Pendlay Row", sets: "4", reps: "5-8", rest: "2-3 min" },
+    { name: "Neutral-Grip Lat Pulldown", sets: "4", reps: "6-10", rest: "2 min" },
+    { name: "Incline Dumbbell Press", sets: "3", reps: "6-10", rest: "2 min" },
+    { name: "Single-Arm Cable Row", sets: "3", reps: "8-12", rest: "90-120 sec" },
+    { name: "Rear Delt Fly", sets: "3", reps: "12-15", rest: "60-90 sec" },
+    { name: "Hammer Curl", sets: "2-3", reps: "10-12", rest: "60-90 sec" },
+  ],
+};
+
+const fridayLowerFullAlt: GymSession = {
+  ...fridayLowerFull,
+  id: "day-5-lower-full-alt",
+  exercises: [
+    { name: "Trap Bar Deadlift", sets: "3-4", reps: "3-6", rest: "2-3 min" },
+    { name: "Leg Press (Heavy)", sets: "3", reps: "6-10", rest: "2 min" },
+    { name: "Walking Lunge", sets: "3", reps: "8-10 / leg", rest: "90-120 sec" },
+    { name: "Chest-Supported Row", sets: "3", reps: "8-12", rest: "90 sec" },
+    { name: "Cable Crunch", sets: "3", reps: "10-15", rest: "60-90 sec" },
+  ],
+};
+
+const saturdayOptionalAlt: GymSession = {
+  ...saturdayOptional,
+  id: "day-6-optional-alt",
+  exercises: [
+    { name: "Goblet Squat", sets: "3", reps: "8-12", rest: "2 min" },
+    { name: "Romanian Deadlift", sets: "3", reps: "6-10", rest: "2 min" },
+    { name: "Standing Overhead Press", sets: "3", reps: "5-8", rest: "2 min" },
+    { name: "Seated Cable Row", sets: "3", reps: "8-12", rest: "90 sec" },
+    { name: "Optional: Sled Push", sets: "4", reps: "20-30 m", rest: "60-90 sec" },
+    { name: "Optional: Tempo Bike", sets: "1", reps: "10-15 min", rest: "n/a" },
+  ],
+};
+
+const sundayRecoveryAlt: GymSession = {
+  ...sundayRecovery,
+  id: "day-7-recovery-alt",
+  exercises: [
+    { name: "Leg Press (Tempo)", sets: "3", reps: "8-10", rest: "2 min" },
+    { name: "Romanian Deadlift (Light)", sets: "3", reps: "6-8", rest: "2 min" },
+    { name: "Dumbbell Bench Press (Light)", sets: "3", reps: "8-10", rest: "90-120 sec" },
+    { name: "Lat Pulldown (Light)", sets: "3", reps: "8-10", rest: "90 sec" },
+    { name: "Optional: Mobility Flow", sets: "1-2", reps: "8-10 / side", rest: "45 sec" },
+  ],
+};
+
 // JavaScript getDay(): 0=Sun ... 6=Sat
 const SESSION_BY_WEEKDAY: Record<number, GymSession> = {
   0: sundayRecovery,
@@ -149,8 +241,49 @@ const SESSION_BY_WEEKDAY: Record<number, GymSession> = {
   6: saturdayOptional,
 };
 
+const SPLIT_BY_WEEKDAY: Record<number, DaySplitKey> = {
+  0: "recovery",
+  1: "upper_push",
+  2: "lower",
+  3: "recovery",
+  4: "upper_pull",
+  5: "lower_full",
+  6: "optional",
+};
+
+const SESSION_VARIANTS_BY_SPLIT: Record<DaySplitKey, GymSession[]> = {
+  upper_push: [mondayUpperPush, mondayUpperPushAlt],
+  lower: [tuesdayLower, tuesdayLowerAlt],
+  recovery: [wednesdayRecovery, wednesdayRecoveryAlt, sundayRecovery, sundayRecoveryAlt],
+  upper_pull: [thursdayUpperPull, thursdayUpperPullAlt],
+  lower_full: [fridayLowerFull, fridayLowerFullAlt],
+  optional: [saturdayOptional, saturdayOptionalAlt],
+};
+
 export function getGymSessionForDate(d: Date): GymSession {
   return SESSION_BY_WEEKDAY[d.getDay()] ?? mondayUpperPush;
+}
+
+export function getGymSessionRefreshForDate(d: Date, excludeSessionId?: string): GymSession {
+  const split = SPLIT_BY_WEEKDAY[d.getDay()] ?? "upper_push";
+  const candidates = SESSION_VARIANTS_BY_SPLIT[split] ?? [getGymSessionForDate(d)];
+  const withoutExcluded = excludeSessionId ? candidates.filter((s) => s.id !== excludeSessionId) : candidates;
+  if (withoutExcluded.length > 0) {
+    return withoutExcluded[0];
+  }
+  return candidates[0] ?? getGymSessionForDate(d);
+}
+
+export function identifyGymSessionForDateAndSteps(d: Date, steps: string[]): GymSession | null {
+  const split = SPLIT_BY_WEEKDAY[d.getDay()] ?? "upper_push";
+  const candidates = SESSION_VARIANTS_BY_SPLIT[split] ?? [getGymSessionForDate(d)];
+  const key = JSON.stringify(steps);
+  for (const session of candidates) {
+    if (JSON.stringify(session.exercises.map(toExerciseStep)) === key) {
+      return session;
+    }
+  }
+  return null;
 }
 
 export function getTodayTrainingHeadline(d: Date): string {

@@ -7,14 +7,15 @@ export const HOME_HERO_SUBHEADLINE = "Structured training. Real progression. No 
 
 export const PRO_LOCKED_HEADLINE = "You've reached the limit of your current system";
 
-export const PRO_LOCKED_BODY_LEAD = "Most people stay here — and stop progressing.";
+export const PRO_LOCKED_BODY_LEAD = "Most people stay here and stop progressing.";
 
 export const PRO_LOCKED_BODY_PREFIX = "The full system gives you:";
 
 export const PRO_LOCKED_BULLETS = [
-  "Higher training volume with controlled fatigue",
-  "Faster progression pacing and deeper auto-regulation",
-  "Advanced programming phases beyond the free cap",
+  "Structured weekly training",
+  "Real strength progression",
+  "Smarter sessions that adapt to you",
+  "Faster results",
 ] as const;
 
 /** Primary CTA — price comes from `EARLY_ACCESS_PRICE_LABEL` in monetization. */
@@ -24,7 +25,7 @@ export function proUnlockCtaLabel(priceLabel: string): string {
 }
 
 export const PRO_CTA_EMAIL_HINT = "Use the same email to unlock instantly";
-export const PRO_CTA_PRICE_HINT = "One-time upgrade";
+export const PRO_CTA_PRICE_HINT = "One-time early access";
 
 export const FIRST_SYSTEM_MOMENT_LINE_1 = "You've started your system";
 export const FIRST_SYSTEM_MOMENT_LINE_2 = "Most people never get this far";

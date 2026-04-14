@@ -17,6 +17,11 @@ export type SessionAutoAdjustment = {
   overThreshold: boolean;
 };
 
+export type ProgramWeekInfo = {
+  weekNumber: 1 | 2 | 3 | 4;
+  intent: string;
+};
+
 const EMPTY_VOLUME: WeeklyVolumeByMuscle = {
   chest: 0,
   back: 0,
@@ -50,6 +55,20 @@ function isoWeekNumber(d: Date): number {
 export function isDeloadWeek(date: Date): boolean {
   const week = isoWeekNumber(date);
   return week % 4 === 0;
+}
+
+export function getProgramWeekInfo(date: Date): ProgramWeekInfo {
+  const isoWeek = isoWeekNumber(date);
+  const cycleWeek = (((isoWeek - 1) % 4) + 1) as 1 | 2 | 3 | 4;
+  const intent =
+    cycleWeek === 1
+      ? "Build baseline"
+      : cycleWeek === 2
+        ? "Increase volume"
+        : cycleWeek === 3
+          ? "Push intensity"
+          : "Deload";
+  return { weekNumber: cycleWeek, intent };
 }
 
 export function calculateWeeklyVolumeByMuscle(rows: ExerciseVolumeRow[]): WeeklyVolumeByMuscle {

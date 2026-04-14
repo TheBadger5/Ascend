@@ -7,7 +7,7 @@ export default function FreeVsProComparison({ className = "" }: { className?: st
         <tr className="text-zinc-500">
           <th className="pb-2 pr-3 font-medium" />
           <th className="pb-2 font-medium">Free</th>
-          <th className="pb-2 font-medium text-zinc-300">Pro</th>
+          <th className="pb-2 font-medium text-zinc-300">Unlock Full System</th>
         </tr>
       </thead>
       <tbody className="text-zinc-400">

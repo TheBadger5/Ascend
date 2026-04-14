@@ -6,14 +6,15 @@ import {
   createEmptyTrainingXp,
   ensureStrengthLine,
   getPathLevelFromXp,
-  migrateTrainingXp,
   STRENGTH_UNLOCK_PATH_ID,
   type TrainingXpState,
 } from "@/lib/ascend-path-config";
 import { getProgressionSummary } from "@/lib/progression-gate";
 import { getMaxXpForFreeTier, getSessionsRequiredForLevelUp } from "@/lib/monetization";
-import { getCurrentUser, getOrCreateProfile } from "@/lib/ascend-data";
+import { getCurrentUser } from "@/lib/ascend-data";
 import { fetchLatestExerciseHistory, type ExerciseHistoryRow } from "@/lib/exercise-progression";
+import { readStrengthXpFromStorage, saveStrengthXpToStorage } from "@/lib/strength-xp-store";
+import { loadSupabaseBackedStrengthXp } from "@/lib/strength-xp-sync";
 import { useProEntitlement } from "@/lib/use-pro-entitlement";
 import FreeVsProComparison from "@/components/free-vs-pro-comparison";
 import ProLockedCard from "@/components/pro-locked-card";
@@ -36,8 +37,6 @@ function sessionSummaryLine(e: PerformanceSessionEntry): string {
   const parts = [e.lift, e.setsReps, e.load].filter(Boolean);
   return parts.length > 0 ? parts.join(" · ") : "—";
 }
-
-const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
 
 const CALIBRATION_GROUPS = {
   lower: ["Back Squat", "Leg Press", "Front Squat"],
@@ -66,6 +65,7 @@ export default function ProgressPage() {
   const { isPaidUser, isPaidReady, effectivePro } = useProEntitlement();
   const [trainingXp, setTrainingXp] = useState<TrainingXpState>(createEmptyTrainingXp());
   const [isReady, setIsReady] = useState(false);
+  const [xpResolved, setXpResolved] = useState(false);
   const [perfPair, setPerfPair] = useState<{
     previous: PerformanceSessionEntry | null;
     current: PerformanceSessionEntry | null;
@@ -79,9 +79,15 @@ export default function ProgressPage() {
   useEffect(() => {
     if (!isPaidReady) return;
     const load = async () => {
-      const storedXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
-      let xpState = migrateTrainingXp(storedXp ? JSON.parse(storedXp) : null);
+      setXpResolved(false);
+      const { state: storedXpState } = readStrengthXpFromStorage();
+      let xpState = ensureStrengthLine(storedXpState);
       xpState = ensureStrengthLine(xpState);
+      const user = await getCurrentUser();
+      if (user) {
+        const supabaseBacked = await loadSupabaseBackedStrengthXp(user.id, xpState);
+        xpState = supabaseBacked.state;
+      }
       if (!effectivePro) {
         const cap = getMaxXpForFreeTier();
         if (xpState.strength.xp > cap) {
@@ -92,11 +98,10 @@ export default function ProgressPage() {
         }
       }
       setTrainingXp(xpState);
-      window.localStorage.setItem(PATH_XP_STORAGE_KEY, JSON.stringify(xpState));
+      saveStrengthXpToStorage(xpState);
+      setXpResolved(true);
       setPerfPair(getLastTwoSessions());
-      const user = await getCurrentUser();
       if (user) {
-        await getOrCreateProfile(user.id);
         const names = [
           ...CALIBRATION_GROUPS.lower,
           ...CALIBRATION_GROUPS.bench,
@@ -114,7 +119,7 @@ export default function ProgressPage() {
     void load();
   }, [isPaidReady, effectivePro]);
 
-  if (!isReady) {
+  if (!isReady || !xpResolved) {
     return <LoadingScreen label="Loading training progress..." />;
   }
 
@@ -185,8 +190,8 @@ export default function ProgressPage() {
           )}
 
           <div className="mb-6 rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Experience</p>
-            <p className="mt-2 text-2xl font-semibold text-zinc-100">{progress.xp} XP</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Strength XP</p>
+            <p className="mt-2 text-2xl font-semibold text-zinc-100">{progress.xp} Strength XP</p>
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-zinc-700">
               <div className="h-full rounded-full bg-zinc-300 transition-all duration-300" style={{ width: `${xpInLevel}%` }} />
             </div>
@@ -214,7 +219,9 @@ export default function ProgressPage() {
             <div className="mb-6">
               <ProLockedCard variant="standard">
                 <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-600">Free vs Pro</p>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
+                    Free vs Unlock Full System
+                  </p>
                   <div className="mt-2">
                     <FreeVsProComparison />
                   </div>
@@ -222,7 +229,7 @@ export default function ProgressPage() {
               </ProLockedCard>
               <p className="mt-4 text-center text-[11px] text-zinc-600">
                 <Link href="/upgrade" className="font-medium text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline">
-                  Full comparison
+                  Unlock Full System details
                 </Link>
               </p>
             </div>

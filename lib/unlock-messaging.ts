@@ -13,28 +13,28 @@ export function xpToReachUnlockThreshold(levelRequirement: number, currentXp: nu
 }
 
 const PREVIEW_PHRASE: Record<string, string> = {
-  Foundation: "foundation programming — compound-first, repeatable sessions",
-  Progression: "progression block — added volume and exercise depth",
-  Intensity: "intensity block — heavier ranges and advanced loading",
-  Optimisation: "optimisation — fatigue control and planned deloads",
-  Advanced: "advanced system — full auto-regulated progression",
+  "Core System": "core system — full training structure active",
+  "Improved Feedback": "improved feedback — clearer progress signals",
+  "Smarter Progression": "smarter progression — stronger adjustment logic",
+  "Fatigue Optimisation": "fatigue optimisation — better recovery balancing",
+  "Advanced Insights": "advanced insights — deeper performance tracking",
 };
 
 const UNLOCK_MOMENT: Record<string, string> = {
-  Foundation: "Unlocked: Foundation — your core weekly strength system is now active.",
-  Progression: "Unlocked: Progression — more productive volume and exercise variety.",
-  Intensity: "Unlocked: Intensity — heavier targets and advanced progression methods.",
-  Optimisation: "Unlocked: Optimisation — fatigue management and deload controls.",
-  Advanced: "Unlocked: Advanced — full auto-regulated progression system.",
+  "Core System": "Unlocked: Core System — your training system is fully active.",
+  "Improved Feedback": "Unlocked: Improved Feedback — clearer session progress signals.",
+  "Smarter Progression": "Unlocked: Smarter Progression — smarter progression adjustments are active.",
+  "Fatigue Optimisation": "Unlocked: Fatigue Optimisation — recovery balancing improved.",
+  "Advanced Insights": "Unlocked: Advanced Insights — deeper tracking and insight quality active.",
 };
 
 /** Greyed card — why it matters while still locked. */
 const LOCKED_TEASER: Record<string, string> = {
-  Foundation: "Reliable baseline program: compounds first, accessories second, repeat weekly.",
-  Progression: "More exercises and volume to drive measurable adaptation each week.",
-  Intensity: "Heavier rep bands plus progression methods for key lifts.",
-  Optimisation: "Automatic fatigue controls and deload timing to protect recovery.",
-  Advanced: "Full system: readiness + effort-informed progression and autoregulation.",
+  "Core System": "Core structure is already active and adapts to your selected training level.",
+  "Improved Feedback": "Sharper post-session feedback to make progress easier to read.",
+  "Smarter Progression": "Smarter progression responses for better load and rep decisions.",
+  "Fatigue Optimisation": "Stronger fatigue and deload optimization for recovery protection.",
+  "Advanced Insights": "Deeper trend tracking and insight quality to refine outcomes.",
 };
 
 export function unlockLevelPreviewLine(unlock: PathUnlock): string {

@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { migrateTrainingXp } from "@/lib/ascend-path-config";
-import { getCurrentUser, getOrCreateProfile } from "@/lib/ascend-data";
+import { getCurrentUser } from "@/lib/ascend-data";
+import { getMaxXpForFreeTier } from "@/lib/monetization";
 import { supabase } from "@/lib/supabase";
+import { readStrengthXpFromStorage } from "@/lib/strength-xp-store";
+import { loadSupabaseBackedStrengthXp } from "@/lib/strength-xp-sync";
+import { useProEntitlement } from "@/lib/use-pro-entitlement";
 import LoadingScreen from "../loading-screen";
-
-const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
 
 type DailyHistoryEntry = {
   date: string;
@@ -41,6 +42,7 @@ const formatDate = (dateKey: string) => {
 };
 
 export default function StatsPage() {
+  const { effectivePro, isPaidReady } = useProEntitlement();
   const [totalXP, setTotalXP] = useState(0);
   const [currentStreak, setCurrentStreak] = useState(0);
   const [bestStreak, setBestStreak] = useState(0);
@@ -48,25 +50,33 @@ export default function StatsPage() {
   const [weeklyExecutedDays, setWeeklyExecutedDays] = useState(0);
   const [dailyHistory, setDailyHistory] = useState<DailyHistoryEntry[]>([]);
   const [isReady, setIsReady] = useState(false);
+  const [xpResolved, setXpResolved] = useState(false);
 
   useEffect(() => {
+    if (!isPaidReady) return;
     const load = async () => {
+      setXpResolved(false);
+      const { raw: rawPathXp, state: localXpState } = readStrengthXpFromStorage();
+      console.log("[XP DEBUG] stats raw ascend.path-xp.v1:", rawPathXp);
       const user = await getCurrentUser();
       if (!user) {
+        const localXp = effectivePro ? localXpState.strength.xp : Math.min(localXpState.strength.xp, getMaxXpForFreeTier());
+        setTotalXP(localXp);
+        console.log("[XP DEBUG] stats XP used:", localXp);
+        setXpResolved(true);
         setIsReady(true);
         return;
       }
-      const profile = await getOrCreateProfile(user.id);
+      const supabaseBacked = await loadSupabaseBackedStrengthXp(user.id, localXpState);
+      const profile = supabaseBacked.profile;
       setCurrentStreak(profile.current_streak);
       setBestStreak(profile.best_streak);
-
-      const rawPathXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
-      if (rawPathXp) {
-        const merged = migrateTrainingXp(JSON.parse(rawPathXp));
-        setTotalXP(merged.strength.xp);
-      } else {
-        setTotalXP(profile.total_xp);
-      }
+      const resolvedXp = effectivePro
+        ? supabaseBacked.state.strength.xp
+        : Math.min(supabaseBacked.state.strength.xp, getMaxXpForFreeTier());
+      setTotalXP(resolvedXp);
+      console.log("[XP DEBUG] stats XP used:", resolvedXp);
+      setXpResolved(true);
 
       const { data: historyRows } = await supabase
         .from("history")
@@ -89,7 +99,7 @@ export default function StatsPage() {
       setIsReady(true);
     };
     load();
-  }, []);
+  }, [effectivePro, isPaidReady]);
 
   const totalDaysExecuted = useMemo(
     () => dailyHistory.filter((entry) => entry.allCompleted).length,
@@ -108,7 +118,7 @@ export default function StatsPage() {
     [last7Days]
   );
 
-  if (!isReady) {
+  if (!isReady || !xpResolved) {
     return <LoadingScreen label="Loading system metrics..." />;
   }
 
@@ -121,7 +131,7 @@ export default function StatsPage() {
 
           <div className="grid w-full grid-cols-2 gap-3">
             <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
-              <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Total XP</p>
+              <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Strength XP</p>
               <p className="mt-1 text-3xl font-semibold text-zinc-100">{totalXP}</p>
             </div>
             <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
@@ -140,7 +150,7 @@ export default function StatsPage() {
 
           <div className="mt-5 grid w-full grid-cols-2 gap-3">
             <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
-              <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">XP This Week</p>
+              <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Strength XP This Week</p>
               <p className="mt-1 text-2xl font-semibold text-zinc-100">{weeklyXP}</p>
             </div>
             <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
@@ -152,7 +162,7 @@ export default function StatsPage() {
           </div>
 
           <div className="mt-5 rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
-            <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">XP Last 7 Days</p>
+            <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Strength XP Last 7 Days</p>
             <div className="mt-4 grid grid-cols-7 gap-2">
               {last7Days.length === 0 ? (
                 <p className="col-span-7 text-sm text-zinc-500">No data yet.</p>
@@ -190,7 +200,7 @@ export default function StatsPage() {
                   >
                     <p className="text-sm text-zinc-200">{formatDate(entry.date)}</p>
                     <div className="flex items-center gap-5 text-xs text-zinc-400">
-                      <span>{entry.xpEarned} XP</span>
+                      <span>{entry.xpEarned} Strength XP</span>
                       <span>{entry.allCompleted ? "Executed: Yes" : "Executed: No"}</span>
                     </div>
                   </div>

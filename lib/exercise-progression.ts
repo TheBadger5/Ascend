@@ -12,6 +12,7 @@ export type ExerciseSpec = {
 };
 
 type TargetReadiness = "fresh" | "normal" | "tired";
+type ProgressionSpeed = "slow" | "standard" | "aggressive";
 
 export type ExerciseHistoryRow = {
   exercise_name: string;
@@ -94,10 +95,13 @@ export function formatLastPerformance(row: ExerciseHistoryRow): string {
 export function getDoubleProgressionTarget(
   spec: ExerciseSpec,
   last: ExerciseHistoryRow | null,
-  readiness: TargetReadiness = "normal"
+  readiness: TargetReadiness = "normal",
+  progressionSpeed: ProgressionSpeed = "standard"
 ): string {
   if (!last || spec.repMin == null || spec.repMax == null) {
-    return "Target: establish baseline at a manageable load and log all sets.";
+    if (progressionSpeed === "slow") return "Target: set a light baseline today.";
+    if (progressionSpeed === "aggressive") return "Target: set a challenging baseline today.";
+    return "Target: set a clean baseline today.";
   }
   const repMin = spec.repMin;
   const repMax = spec.repMax;
@@ -106,28 +110,39 @@ export function getDoubleProgressionTarget(
   const performedSetCount = Math.max(1, last.sets_completed);
   const setCount = Math.min(plannedSetCount, performedSetCount, reps.length);
   const used = reps.slice(0, setCount);
+  const minMisses = used.filter((r) => r < repMin).length;
+  const belowMinimum = minMisses > 0;
+  const severeRegression = used.length > 0 && used.every((r) => r <= repMin - 2);
   const topHitAllSets = used.length === setCount && used.every((r) => r >= repMax);
   const easyStreak = last.recent_efforts.length >= 2 && last.recent_efforts.slice(0, 2).every((r) => r === "easy");
   const veryHardRecent = last.recent_efforts[0] === "very_hard";
-  const baseStep = easyStreak ? 5 : 2.5;
-  const loadStep = readiness === "fresh" ? baseStep + 2.5 : baseStep;
-  const tiredCut = readiness === "tired" ? 2.5 : 0;
+  const speedBaseStep = progressionSpeed === "slow" ? 1.25 : progressionSpeed === "aggressive" ? 5 : 2.5;
+  const easyBonus = progressionSpeed === "aggressive" ? 2.5 : progressionSpeed === "slow" ? 0 : 1.25;
+  const baseStep = easyStreak ? speedBaseStep + easyBonus : speedBaseStep;
+  const loadStep = readiness === "fresh" ? baseStep + (progressionSpeed === "slow" ? 1.25 : 2.5) : baseStep;
+  const tiredCut = readiness === "tired" ? (progressionSpeed === "aggressive" ? 1.25 : 2.5) : 0;
+  if (severeRegression) {
+    const downWeight = Number(Math.max(0, last.last_weight - (2.5 + tiredCut)).toFixed(1));
+    return `Target: stay here until you own this weight (or reduce to ${downWeight}kg).`;
+  }
+  if (belowMinimum) {
+    return "Target: stay here until you own this weight.";
+  }
   if (veryHardRecent) {
     const downWeight = Number(Math.max(0, last.last_weight - (2.5 + tiredCut)).toFixed(1));
-    return `Target: maintain ${last.last_weight}kg (or reduce to ${downWeight}kg) and keep reps clean.`;
+    return `Target: match ${last.last_weight}kg safely (or ${downWeight}kg if needed).`;
   }
   if (readiness === "tired") {
     const lightWeight = Number(Math.max(0, last.last_weight - tiredCut).toFixed(1));
-    return `Target: conservative day — use ${lightWeight}kg and keep reps technically crisp.`;
+    return `Target: use ${lightWeight}kg and keep form sharp.`;
   }
   if (topHitAllSets) {
     const nextWeight = Number((last.last_weight + loadStep).toFixed(1));
     return `Target: increase to ${nextWeight}kg and hit ${repMin}-${repMax} reps.`;
   }
-  if (easyStreak) {
-    return `Target: reps look comfortable — push hard toward ${repMax} each set, then jump load next session.`;
-  }
-  return `Target: keep ${last.last_weight}kg and add reps toward ${repMax} each set.`;
+  return easyStreak
+    ? `Target: beat this by adding reps across sets.`
+    : `Target: beat this by adding reps toward ${repMax}.`;
 }
 
 export async function fetchLatestExerciseHistory(

@@ -15,6 +15,13 @@ create table if not exists public.profiles (
 
 -- Existing databases: add column if missing
 alter table public.profiles add column if not exists is_paid_user boolean not null default false;
+alter table public.profiles add column if not exists total_strength_xp integer not null default 0;
+alter table public.profiles add column if not exists strength_level integer not null default 1;
+alter table public.profiles add column if not exists system_integrity integer not null default 100;
+alter table public.profiles add column if not exists strength_gate_sessions integer not null default 0;
+alter table public.profiles add column if not exists strength_gate_dates jsonb not null default '[]'::jsonb;
+alter table public.profiles add column if not exists strength_gate_tracked_level integer not null default 1;
+alter table public.profiles add column if not exists training_level text not null default 'intermediate';
 
 -- Baseline (Day 1) + latest self-reported metrics for progression feedback
 alter table public.profiles add column if not exists pushups_max integer;
@@ -31,9 +38,11 @@ create table if not exists public.daily_tasks (
   date text not null,
   tasks jsonb not null,
   completed jsonb not null,
+  daily_refresh_count integer not null default 0,
   created_at timestamp with time zone default now(),
   unique(user_id, date)
 );
+alter table public.daily_tasks add column if not exists daily_refresh_count integer not null default 0;
 
 create table if not exists public.history (
   id uuid primary key default gen_random_uuid(),
@@ -78,10 +87,40 @@ create table if not exists public.exercise_history (
 );
 alter table public.exercise_history add column if not exists effort_rating text;
 
+create table if not exists public.training_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  session_type text not null,
+  completed_at timestamp with time zone not null default now(),
+  xp_earned integer not null default 0,
+  total_volume numeric not null default 0,
+  fatigue_state text not null default 'normal',
+  created_at timestamp with time zone default now()
+);
+
+create table if not exists public.exercise_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  session_id uuid not null references public.training_sessions(id) on delete cascade,
+  exercise_name text not null,
+  weight numeric not null,
+  reps jsonb not null,
+  sets integer not null,
+  rpe text not null,
+  logged_at timestamp with time zone not null default now(),
+  created_at timestamp with time zone default now()
+);
+
 create index if not exists user_events_user_id_created_at_idx
   on public.user_events (user_id, created_at desc);
 create index if not exists exercise_history_user_exercise_date_idx
   on public.exercise_history (user_id, exercise_name, session_date desc);
+create index if not exists training_sessions_user_completed_idx
+  on public.training_sessions (user_id, completed_at desc);
+create index if not exists exercise_logs_user_logged_idx
+  on public.exercise_logs (user_id, logged_at desc);
+create index if not exists exercise_logs_session_idx
+  on public.exercise_logs (session_id);
 
 alter table public.profiles enable row level security;
 alter table public.daily_tasks enable row level security;
@@ -89,6 +128,8 @@ alter table public.history enable row level security;
 alter table public.weekly_reviews enable row level security;
 alter table public.user_events enable row level security;
 alter table public.exercise_history enable row level security;
+alter table public.training_sessions enable row level security;
+alter table public.exercise_logs enable row level security;
 
 drop policy if exists "profiles_owner_select" on public.profiles;
 drop policy if exists "profiles_owner_insert" on public.profiles;
@@ -155,6 +196,32 @@ create policy "exercise_history_owner_insert" on public.exercise_history
   for insert with check (auth.uid() = user_id);
 create policy "exercise_history_owner_select" on public.exercise_history
   for select using (auth.uid() = user_id);
+
+drop policy if exists "training_sessions_owner_insert" on public.training_sessions;
+drop policy if exists "training_sessions_owner_select" on public.training_sessions;
+drop policy if exists "training_sessions_owner_update" on public.training_sessions;
+drop policy if exists "training_sessions_owner_delete" on public.training_sessions;
+create policy "training_sessions_owner_insert" on public.training_sessions
+  for insert with check (auth.uid() = user_id);
+create policy "training_sessions_owner_select" on public.training_sessions
+  for select using (auth.uid() = user_id);
+create policy "training_sessions_owner_update" on public.training_sessions
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "training_sessions_owner_delete" on public.training_sessions
+  for delete using (auth.uid() = user_id);
+
+drop policy if exists "exercise_logs_owner_insert" on public.exercise_logs;
+drop policy if exists "exercise_logs_owner_select" on public.exercise_logs;
+drop policy if exists "exercise_logs_owner_update" on public.exercise_logs;
+drop policy if exists "exercise_logs_owner_delete" on public.exercise_logs;
+create policy "exercise_logs_owner_insert" on public.exercise_logs
+  for insert with check (auth.uid() = user_id);
+create policy "exercise_logs_owner_select" on public.exercise_logs
+  for select using (auth.uid() = user_id);
+create policy "exercise_logs_owner_update" on public.exercise_logs
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "exercise_logs_owner_delete" on public.exercise_logs
+  for delete using (auth.uid() = user_id);
 
 /**
  * Called only from the Gumroad webhook API route using the Supabase service role.

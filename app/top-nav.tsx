@@ -123,7 +123,7 @@ export default function TopNav() {
                 isUpgrade ? "bg-zinc-200 text-zinc-900" : "text-zinc-400 hover:text-zinc-100"
               }`}
             >
-              Upgrade
+              Unlock Full System
             </Link>
           )}
           </nav>

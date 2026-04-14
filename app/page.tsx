@@ -5,7 +5,6 @@ import {
   ensureStrengthLine,
   getPathLevelFromXp,
   getSystemMetricsFromTrainingXp,
-  migrateTrainingXp,
   STRENGTH_UNLOCK_PATH_ID,
   type TrainingXpState,
 } from "@/lib/ascend-path-config";
@@ -23,27 +22,29 @@ import {
   HOME_HERO_HEADLINE,
   HOME_HERO_SUBHEADLINE,
 } from "@/lib/pro-conversion-copy";
-import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
+import { getCurrentUser, type ProfileRow } from "@/lib/ascend-data";
 import {
-  ADVANCED_UNLOCK_LEVEL,
   getActivePathUnlocks,
   getNewlyUnlockedForLevel,
   getNextStrengthUnlock,
-  INTENSITY_UNLOCK_LEVEL,
-  OPTIMISATION_UNLOCK_LEVEL,
   getPathUnlocks,
-  SPLIT_TRAINING_UNLOCK_LEVEL,
   type PathUnlock,
 } from "@/lib/path-unlocks";
 import {
   findStrengthTaskByTitle,
   getStrengthBeltFromPathLevel,
-  getStrengthTrainingPoolForPathLevel,
   strengthTaskTitleIsProOnly,
   STRENGTH_BELT_LABELS,
-  type StrengthTaskPoolEntry,
 } from "@/lib/strength-progression";
-import { applySessionVolumeScale, getGymSessionForDate, getTodayTrainingHeadline, toExerciseStep } from "@/lib/weekly-gym-program";
+import {
+  applySessionVolumeScale,
+  getGymSessionForDate,
+  getGymSessionRefreshForDate,
+  getTodayTrainingHeadline,
+  identifyGymSessionForDateAndSteps,
+  toExerciseStep,
+  type GymSession,
+} from "@/lib/weekly-gym-program";
 import {
   fetchExerciseVolumeRowsForRange,
   fetchExercisePerformanceRowsForNames,
@@ -62,6 +63,7 @@ import {
 } from "@/lib/exercise-progression";
 import {
   calculateWeeklyVolumeByMuscle,
+  getProgramWeekInfo,
   getSessionAutoAdjustment,
   type WeeklyVolumeByMuscle,
 } from "@/lib/volume-fatigue";
@@ -129,8 +131,19 @@ import {
   sundayDateKeyFromMonday,
 } from "@/lib/retention-loops";
 import { useProEntitlement } from "@/lib/use-pro-entitlement";
-
-const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
+import { readStrengthXpFromStorage, saveStrengthXpToStorage } from "@/lib/strength-xp-store";
+import {
+  loadSupabaseBackedStrengthXp,
+  logTrainingSessionToSupabase,
+  persistStrengthXpToSupabase,
+} from "@/lib/strength-xp-sync";
+import {
+  normalizeTrainingLevel,
+  progressionSpeedForTrainingLevel,
+  TRAINING_LEVEL_STORAGE_KEY,
+  trainingLevelLabel,
+  type TrainingLevel,
+} from "@/lib/training-level";
 const ONBOARDING_STORAGE_KEY = "ascend.onboarding.completed.v1";
 const ONBOARDING_STEPS = [
   "A system to build strength, discipline, and a powerful body.",
@@ -139,9 +152,52 @@ const ONBOARDING_STEPS = [
   "You are not chasing motivation. You are building a body that shows up.",
 ] as const;
 const STRENGTH_PATH_ID = STRENGTH_UNLOCK_PATH_ID;
-const SESSION_PROTOCOL_XP = 10;
-const SESSION_COMPLETION_BONUS_XP = 15;
-const SESSION_QUEST_ID_BASE = 2000;
+const formatStrengthXpGain = (xp: number) => `+${xp} Strength XP`;
+const FREE_DAILY_REFRESH_LIMIT = 1;
+const COMPOUND_LIFT_KEYWORDS = [
+  "squat",
+  "deadlift",
+  "bench",
+  "overhead press",
+  "row",
+  "pull-up",
+  "pulldown",
+];
+const readinessFeedbackLine = (readiness: ReadinessLevel): string | null => {
+  if (readiness === "fresh") return "Volume increased today. Load targets nudged up.";
+  if (readiness === "tired") return "Volume reduced due to fatigue. Load targets nudged down.";
+  return null;
+};
+const readinessForTrainingLevel = (readiness: ReadinessLevel, level: TrainingLevel): ReadinessLevel => {
+  if (level === "beginner" && readiness === "fresh") return "normal";
+  if (level === "advanced" && readiness === "tired") return "normal";
+  return readiness;
+};
+const getExerciseIntentLabel = (exerciseName: string, index: number): "Main Lift" | "Accessory" | "Volume Builder" => {
+  const n = exerciseName.toLowerCase();
+  if (COMPOUND_LIFT_KEYWORDS.some((k) => n.includes(k)) || index <= 1) return "Main Lift";
+  if (index <= 3) return "Accessory";
+  return "Volume Builder";
+};
+const repRangeForTrainingLevel = (level: TrainingLevel, repLabel: string): string => {
+  if (level === "beginner") return "8-12";
+  if (level === "advanced") {
+    const lower = repLabel.includes("12") || repLabel.includes("15");
+    return lower ? "6-10" : "4-8";
+  }
+  return "6-10";
+};
+const setLabelForTrainingLevel = (level: TrainingLevel, setLabel: string): string => {
+  const m = setLabel.match(/(\d+)(?:-(\d+))?/);
+  if (!m) return setLabel;
+  const min = Number.parseInt(m[1] ?? "0", 10);
+  const max = m[2] ? Number.parseInt(m[2], 10) : min;
+  if (!Number.isFinite(min) || min <= 0 || !Number.isFinite(max) || max <= 0) return setLabel;
+  const scale = level === "beginner" ? 0.85 : level === "advanced" ? 1.2 : 1;
+  const nMin = Math.max(1, Math.round(min * scale));
+  const nMax = Math.max(nMin, Math.round(max * scale));
+  return nMin === nMax ? String(nMin) : `${nMin}-${nMax}`;
+};
 const PRO_PROGRESS_MOMENT_PROMPT_KEY = "ascend.pro-progress-prompt.v1";
 const EMPTY_WEEKLY_VOLUME: WeeklyVolumeByMuscle = {
   chest: 0,
@@ -159,20 +215,6 @@ const EFFORT_OPTIONS: Array<{ value: EffortRating; label: string }> = [
   { value: "very_hard", label: "Very Hard" },
 ];
 
-const poolEntryToDailyQuest = (entry: StrengthTaskPoolEntry, id: number): DailyQuest => ({
-  id,
-  category: "Strength",
-  path: STRENGTH_PATH_ID,
-  title: entry.title,
-  instruction: entry.instruction,
-  steps: entry.steps,
-  why: entry.why,
-  examples: entry.examples,
-  minimum: entry.minimum,
-  insight: entry.insight,
-  task: entry.title,
-});
-
 type DailyQuest = {
   id: number;
   category: string;
@@ -189,6 +231,17 @@ type DailyQuest = {
 type TaskDetail = { instruction: string; steps: string[]; whyItMatters: string; insight: string; examples: string[]; minimumViable: string };
 type TaskPoolEntry = { title: string; instruction: string; steps: string[]; why: string; insight: string; examples: string[]; minimum: string };
 type QuestEffectInputState = Record<number, Record<string, string>>;
+
+type UndoCompletionRecord =
+  | {
+      kind: "daily";
+      dateKey: string;
+      questId: number;
+      previousXpState: TrainingXpState;
+      previousCompleted: boolean[];
+      xpAwarded: number;
+      allDoneBeforeUndo: boolean;
+    };
 type ExerciseInputField = "weight" | "reps" | "sets" | "effort";
 
 const getExerciseInputKey = (questId: number, exerciseName: string, field: ExerciseInputField): string =>
@@ -347,34 +400,40 @@ const createDailyQuests = (
   trainingXp: TrainingXpState = createEmptyTrainingXp(),
   dateKey: string = getLocalDateKey(),
   isPaidUser = false,
-  weeklyVolume: WeeklyVolumeByMuscle = EMPTY_WEEKLY_VOLUME
+  weeklyVolume: WeeklyVolumeByMuscle = EMPTY_WEEKLY_VOLUME,
+  sessionOverride: GymSession | null = null,
+  trainingLevel: TrainingLevel = "intermediate"
 ): DailyQuest[] => {
   void previous;
   const pathLevel = getPathLevelFromXp(trainingXp.strength?.xp ?? 0);
   const [y, m, d] = dateKey.split("-").map(Number);
   const localDate = new Date(y, m - 1, d);
-  const base = getGymSessionForDate(localDate);
+  const base = sessionOverride ?? getGymSessionForDate(localDate);
   let session = base;
-  if (pathLevel < SPLIT_TRAINING_UNLOCK_LEVEL) {
-    session = { ...session, exercises: session.exercises.slice(0, 4) };
-  }
-  if (pathLevel >= INTENSITY_UNLOCK_LEVEL) {
+  if (trainingLevel === "advanced") {
     session = {
       ...session,
       exercises: session.exercises.map((e, idx) => (idx < 2 ? { ...e, reps: tightenRepRange(e.reps) } : e)),
     };
   }
-  const auto =
-    pathLevel >= OPTIMISATION_UNLOCK_LEVEL
-      ? getSessionAutoAdjustment(localDate, session, weeklyVolume)
-      : { volumeScale: 1, intensityScale: 1, deloadWeek: false, overThreshold: false };
-  const paidAccelerationScale = isPaidUser && pathLevel >= SPLIT_TRAINING_UNLOCK_LEVEL && auto.volumeScale >= 0.99 ? 1.1 : 1;
-  const adjustedSession = applySessionVolumeScale(session, auto.volumeScale * paidAccelerationScale);
+  session = {
+    ...session,
+    exercises: session.exercises.map((e) => ({
+      ...e,
+      sets: setLabelForTrainingLevel(trainingLevel, e.sets),
+      reps: repRangeForTrainingLevel(trainingLevel, e.reps),
+    })),
+  };
+  const auto = getSessionAutoAdjustment(localDate, session, weeklyVolume);
+  const fatigueSensitivityScale = trainingLevel === "beginner" ? 0.9 : trainingLevel === "advanced" ? 1.08 : 1;
+  const adjustedAutoVolumeScale = Math.max(0.45, Math.min(1.25, auto.volumeScale * fatigueSensitivityScale));
+  const paidAccelerationScale = isPaidUser && auto.volumeScale >= 0.99 ? 1.1 : 1;
+  const adjustedSession = applySessionVolumeScale(session, adjustedAutoVolumeScale * paidAccelerationScale);
   const instructionNote =
     auto.intensityScale < 0.99
       ? ` Use roughly ${Math.round(auto.intensityScale * 100)}% of your normal load today.`
-      : isPaidUser && pathLevel >= SPLIT_TRAINING_UNLOCK_LEVEL
-        ? " Pro pacing active: small volume boost while progression remains stable."
+      : isPaidUser
+        ? " Full system intelligence active: smarter pacing while progression remains stable."
         : "";
   return [
     {
@@ -393,6 +452,21 @@ const createDailyQuests = (
   ];
 };
 
+const pickProgressMessages = (input: {
+  strengthImproved: boolean;
+  liftedMore: boolean;
+  newPersonalBest: boolean;
+  volumeChangePercent: number | null;
+}): string[] => {
+  const messages: string[] = [];
+  if (input.newPersonalBest) messages.push("New personal best.");
+  if (input.liftedMore || input.strengthImproved) messages.push("You lifted more than last session.");
+  if (input.volumeChangePercent != null && input.volumeChangePercent > 0) {
+    messages.push(`Volume increased by ${input.volumeChangePercent}%.`);
+  }
+  return messages.slice(0, 3);
+};
+
 export default function Dashboard() {
   const [userId, setUserId] = useState<string | null>(null);
   const [dailyTaskId, setDailyTaskId] = useState<string | null>(null);
@@ -405,10 +479,15 @@ export default function Dashboard() {
   const [expandedQuestIds, setExpandedQuestIds] = useState<Record<number, boolean>>({});
   const [protocolStepChecks, setProtocolStepChecks] = useState<Record<number, boolean[]>>({});
   const [isReady, setIsReady] = useState(false);
+  const [xpResolved, setXpResolved] = useState(false);
   const [loadVersion, setLoadVersion] = useState(0);
   const [trainingXpState, setTrainingXpState] = useState<TrainingXpState>(createEmptyTrainingXp());
+  const trainingXpStateRef = useRef<TrainingXpState>(createEmptyTrainingXp());
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
+  const [trainingLevel, setTrainingLevel] = useState<TrainingLevel>("intermediate");
+  const [trainingLevelSaving, setTrainingLevelSaving] = useState(false);
+  const [trainingLevelNotice, setTrainingLevelNotice] = useState<string | null>(null);
   const [recentlyCompletedIds, setRecentlyCompletedIds] = useState<Record<number, boolean>>({});
   const [recentlyCompletedPathGain, setRecentlyCompletedPathGain] = useState<Record<number, string>>({});
   const [protocolCompletionFeedback, setProtocolCompletionFeedback] = useState<{
@@ -419,6 +498,8 @@ export default function Dashboard() {
     liftedMore: boolean;
     newPersonalBest: boolean;
     weeklyImproving: boolean;
+    volumeChangePercent: number | null;
+    progressMessages: string[];
     weeklyVolume: number;
     strongestLift: string | null;
   } | null>(null);
@@ -429,17 +510,16 @@ export default function Dashboard() {
   const [exerciseHistoryByName, setExerciseHistoryByName] = useState<Record<string, ExerciseHistoryRow>>({});
   const [focusTimerSecondsByQuest, setFocusTimerSecondsByQuest] = useState<Record<number, number>>({});
   const [focusTimerRunningByQuest, setFocusTimerRunningByQuest] = useState<Record<number, boolean>>({});
-  const [trainingSessionOpen, setTrainingSessionOpen] = useState(false);
-  const [sessionOptions, setSessionOptions] = useState<Array<{ entry: StrengthTaskPoolEntry; id: number }>>([]);
-  const [sessionActiveQuest, setSessionActiveQuest] = useState<DailyQuest | null>(null);
-  const [sessionExecutedById, setSessionExecutedById] = useState<Record<number, boolean>>({});
+  const [optionalConditioningDone, setOptionalConditioningDone] = useState(false);
   const [systemIntegrityScore, setSystemIntegrityScore] = useState(100);
   const [dailyReadiness, setDailyReadiness] = useState<ReadinessLevel>("normal");
   const [weeklySessionsCount, setWeeklySessionsCount] = useState(0);
+  const [dailyRefreshCount, setDailyRefreshCount] = useState(0);
   const [weeklyStrengthStats, setWeeklyStrengthStats] = useState<{ totalVolume: number; strongestLift: string | null }>({
     totalVolume: 0,
     strongestLift: null,
   });
+  const [undoCompletion, setUndoCompletion] = useState<UndoCompletionRecord | null>(null);
   const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const [yesterdayDailyMissed, setYesterdayDailyMissed] = useState(false);
   const [yesterdayProtocolTitle, setYesterdayProtocolTitle] = useState<string | null>(null);
@@ -447,13 +527,12 @@ export default function Dashboard() {
     typeof window !== "undefined" ? msUntilProtocolDeadline() : 0
   );
   const protocolDayKeyRef = useRef<string | null>(null);
-  /** Wall-clock start of the extra training session UI (for `session_length_seconds`). */
-  const trainingSessionStartedAtRef = useRef<number | null>(null);
   const firstSystemMomentPendingRef = useRef(false);
   const progressUpgradePromptPendingRef = useRef(false);
   const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
   const [proConversionModalOpen, setProConversionModalOpen] = useState(false);
   const [firstSystemMomentOpen, setFirstSystemMomentOpen] = useState(false);
+  const refreshesLeftToday = Math.max(0, FREE_DAILY_REFRESH_LIMIT - dailyRefreshCount);
 
   useEffect(() => {
     if (effectivePro && proConversionModalOpen) {
@@ -465,6 +544,13 @@ export default function Dashboard() {
     const load = async () => {
       let trainingXpForDaily: TrainingXpState = createEmptyTrainingXp();
       try {
+        setXpResolved(false);
+        setUndoCompletion(null);
+        setOptionalConditioningDone(false);
+        const storedLevel = window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY);
+        if (storedLevel) {
+          setTrainingLevel(normalizeTrainingLevel(storedLevel));
+        }
         const hasCompletedOnboarding = window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
         if (!hasCompletedOnboarding) {
           setShowOnboarding(true);
@@ -472,15 +558,24 @@ export default function Dashboard() {
         }
         setShowOnboarding(false);
 
-        const rawPathXp = window.localStorage.getItem(PATH_XP_STORAGE_KEY);
-        let normalizedXp = migrateTrainingXp(rawPathXp ? JSON.parse(rawPathXp) : null);
+        const { raw: rawPathXp, state: storedXpState } = readStrengthXpFromStorage();
+        let normalizedXp = ensureStrengthLine(storedXpState);
         normalizedXp = ensureStrengthLine(normalizedXp);
+        console.log("[XP DEBUG] homepage raw ascend.path-xp.v1:", rawPathXp);
 
         const resolvedPaid = await refreshPaidAccess();
         const user = await getCurrentUser();
         let profile: ProfileRow | null = null;
         if (user) {
-          profile = (await getOrCreateProfile(user.id)) as ProfileRow;
+          const supabaseBacked = await loadSupabaseBackedStrengthXp(user.id, normalizedXp);
+          normalizedXp = supabaseBacked.state;
+          profile = supabaseBacked.profile;
+          const profileTrainingLevel = normalizeTrainingLevel(supabaseBacked.profile.training_level);
+          setTrainingLevel(profileTrainingLevel);
+          window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, profileTrainingLevel);
+          if (supabaseBacked.migratedFromLocal) {
+            console.log("[XP DEBUG] migrated local XP to Supabase for user:", user.id);
+          }
         }
         if (!resolvedPaid) {
           const cap = getMaxXpForFreeTier();
@@ -492,13 +587,19 @@ export default function Dashboard() {
           }
         }
         setTrainingXpState(normalizedXp);
+        trainingXpStateRef.current = normalizedXp;
         trainingXpForDaily = normalizedXp;
-        window.localStorage.setItem(PATH_XP_STORAGE_KEY, JSON.stringify(normalizedXp));
+        if (rawPathXp != null || normalizedXp.strength.xp > 0 || user) {
+          saveStrengthXpToStorage(normalizedXp);
+        }
         const metrics = getSystemMetricsFromTrainingXp(normalizedXp);
+        console.log("[XP DEBUG] homepage XP used:", metrics.totalXP);
         setTotalXP(metrics.totalXP);
         setLevel(metrics.level);
+        setXpResolved(true);
 
         if (!user) {
+          setDailyRefreshCount(0);
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
           return;
         }
@@ -552,7 +653,7 @@ export default function Dashboard() {
           );
           const firstTitle = singleTasks[0]?.title ?? singleTasks[0]?.task ?? "";
           if (!resolvedPaid && firstTitle && strengthTaskTitleIsProOnly(firstTitle)) {
-            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false, weeklyVolume);
+            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false, weeklyVolume, null, trainingLevel);
             singleTasks = regenerated;
             singleCompleted = Array.from({ length: regenerated.length }, () => false);
             await supabase
@@ -563,6 +664,7 @@ export default function Dashboard() {
           setDailyTaskId(String(todayRow.id));
           setDailyQuests(singleTasks);
           setCompleted(singleCompleted);
+          setDailyRefreshCount(Number(todayRow.daily_refresh_count ?? 0));
           if (
             JSON.stringify(singleTasks) !== JSON.stringify(todayRow.tasks) ||
             JSON.stringify(singleCompleted) !== JSON.stringify(todayRow.completed)
@@ -573,16 +675,31 @@ export default function Dashboard() {
               .eq("id", todayRow.id);
           }
         } else {
-          const generated = createDailyQuests(previousTasks, trainingXpForDaily, today, resolvedPaid, weeklyVolume);
+          const generated = createDailyQuests(
+            previousTasks,
+            trainingXpForDaily,
+            today,
+            resolvedPaid,
+            weeklyVolume,
+            null,
+            trainingLevel
+          );
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
             .from("daily_tasks")
-            .insert({ user_id: user.id, date: today, tasks: generated, completed: initialCompleted })
+            .insert({
+              user_id: user.id,
+              date: today,
+              tasks: generated,
+              completed: initialCompleted,
+              daily_refresh_count: 0,
+            })
             .select("id")
             .single();
           setDailyTaskId(inserted?.id ? String(inserted.id) : null);
           setDailyQuests(generated);
           setCompleted(initialCompleted);
+          setDailyRefreshCount(0);
         }
 
         if (nextStreak !== profile.current_streak) {
@@ -618,6 +735,10 @@ export default function Dashboard() {
         setYesterdayProtocolTitle(missedYesterdayTitle);
 
         const integrityState = loadSystemIntegrityState(today);
+        if (typeof profile.system_integrity === "number" && Number.isFinite(profile.system_integrity)) {
+          integrityState.score = profile.system_integrity;
+          setSystemIntegrityScore(profile.system_integrity);
+        }
         const { data: pastForIntegrity } = await supabase
           .from("daily_tasks")
           .select("date, completed, tasks")
@@ -639,6 +760,7 @@ export default function Dashboard() {
         const nextIntegrity = reconcileSkipPenalties(missedDates, integrityState);
         saveSystemIntegrityState(nextIntegrity);
         setSystemIntegrityScore(nextIntegrity.score);
+        await persistStrengthXpToSupabase(user.id, trainingXpForDaily, { systemIntegrity: nextIntegrity.score });
 
         const weekMon = mondayDateKeyForLocalWeekContaining(today);
         const weekSun = sundayDateKeyFromMonday(weekMon);
@@ -711,7 +833,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!userId) return;
-    const quests = sessionActiveQuest ? [...dailyQuests, sessionActiveQuest] : dailyQuests;
+    const quests = dailyQuests;
     const names = quests.flatMap((q) => getQuestExerciseSpecs(q).map((s) => s.name));
     if (names.length === 0) return;
     let cancelled = false;
@@ -724,7 +846,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [dailyQuests, sessionActiveQuest, userId]);
+  }, [dailyQuests, userId]);
 
   const xpInCurrentLevel = totalXP % 100;
   const levelProgressPercent = xpInCurrentLevel;
@@ -789,7 +911,7 @@ export default function Dashboard() {
   const hasAllExerciseInputsForQuest = (quest: DailyQuest) => {
     const specs = getQuestExerciseSpecs(quest);
     if (specs.length === 0) return true;
-    const requiresEffort = getQuestPathLevel(quest) >= ADVANCED_UNLOCK_LEVEL;
+    const requiresEffort = trainingLevel === "advanced";
     return specs.every((spec) => {
       const weight = Number.parseFloat(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "weight")));
       const reps = parseRepsCsv(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "reps")));
@@ -813,7 +935,7 @@ export default function Dashboard() {
     if (!userId) return [];
     const sessionDate = getLocalDateKey();
     const specs = getQuestExerciseSpecs(quest);
-    const requiresEffort = getQuestPathLevel(quest) >= ADVANCED_UNLOCK_LEVEL;
+    const requiresEffort = trainingLevel === "advanced";
     const rows: ExerciseSessionLogInsert[] = [];
     for (const spec of specs) {
       const weight = Number.parseFloat(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "weight")));
@@ -848,36 +970,45 @@ export default function Dashboard() {
     return rows;
   };
 
-  const applyTrainingXpDelta = (delta: number, opts?: { countDailySession?: boolean }) => {
+  const applyTrainingXpState = (nextState: TrainingXpState) => {
+    const safe = ensureStrengthLine(nextState);
+    trainingXpStateRef.current = safe;
+    saveStrengthXpToStorage(safe);
+    const metrics = getSystemMetricsFromTrainingXp(safe);
+    console.log("[XP DEBUG] XP after session completion:", metrics.totalXP);
+    setTrainingXpState(safe);
+    setTotalXP(metrics.totalXP);
+    setLevel(metrics.level);
+  };
+
+  const applyTrainingXpDelta = (
+    delta: number,
+    opts?: { countDailySession?: boolean }
+  ): { previousState: TrainingXpState; nextState: TrainingXpState } => {
     const paid = effectivePro;
     const sessionsReq = getSessionsRequiredForLevelUp(paid);
     const maxTotalXp = paid ? undefined : getMaxXpForFreeTier();
-    setTrainingXpState((prev) => {
-      const line = ensureStrengthLine(prev).strength;
-      const xpBefore = line.xp;
-      const previousPathLevel = getPathLevelFromXp(xpBefore);
-      const dateKey = opts?.countDailySession ? getLocalDateKey() : undefined;
-      const nextState = applyXpDeltaWithGate(prev, delta, {
-        countDailySession: opts?.countDailySession,
-        dateKey,
-        sessionsRequired: sessionsReq,
-        maxTotalXp,
-      });
-      const xpAfter = nextState.strength.xp;
-      const updatedLevel = getPathLevelFromXp(nextState.strength.xp);
-      const newlyUnlocked = getNewlyUnlockedForLevel(STRENGTH_PATH_ID, previousPathLevel, updatedLevel);
-      if (newlyUnlocked.length > 0) {
-        setUnlockNotification(formatUnlockCelebration(newlyUnlocked));
-        window.setTimeout(() => setUnlockNotification(null), 5800);
-      } else if (!paid && delta > 0 && xpBefore + delta > xpAfter) {
-        window.setTimeout(() => setProConversionModalOpen(true), 0);
-      }
-      window.localStorage.setItem(PATH_XP_STORAGE_KEY, JSON.stringify(nextState));
-      const metrics = getSystemMetricsFromTrainingXp(nextState);
-      setTotalXP(metrics.totalXP);
-      setLevel(metrics.level);
-      return nextState;
+    const previousState = ensureStrengthLine(trainingXpStateRef.current);
+    const xpBefore = previousState.strength.xp;
+    const previousPathLevel = getPathLevelFromXp(xpBefore);
+    const dateKey = opts?.countDailySession ? getLocalDateKey() : undefined;
+    const nextState = applyXpDeltaWithGate(previousState, delta, {
+      countDailySession: opts?.countDailySession,
+      dateKey,
+      sessionsRequired: sessionsReq,
+      maxTotalXp,
     });
+    const xpAfter = nextState.strength.xp;
+    const updatedLevel = getPathLevelFromXp(nextState.strength.xp);
+    const newlyUnlocked = getNewlyUnlockedForLevel(STRENGTH_PATH_ID, previousPathLevel, updatedLevel);
+    if (newlyUnlocked.length > 0) {
+      setUnlockNotification(formatUnlockCelebration(newlyUnlocked));
+      window.setTimeout(() => setUnlockNotification(null), 5800);
+    } else if (!paid && delta > 0 && xpBefore + delta > xpAfter) {
+      window.setTimeout(() => setProConversionModalOpen(true), 0);
+    }
+    applyTrainingXpState(nextState);
+    return { previousState, nextState };
   };
 
   const startFocusTimer = (questId: number) => {
@@ -919,7 +1050,7 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, [focusTimerRunningByQuest]);
 
-  const strengthLevelForEvents = () => getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
+  const strengthLevelForEvents = () => getPathLevelFromXp(trainingXpStateRef.current.strength?.xp ?? 0);
   const totalVolumeFromRows = (rows: Array<{ last_weight: number; last_reps: number[] }>) =>
     rows.reduce((sum, row) => sum + getExerciseLogVolume(row.last_weight, row.last_reps), 0);
 
@@ -927,14 +1058,14 @@ export default function Dashboard() {
     if (!userId || dailyTaskId === null || completed[idx]) return;
     const quest = dailyQuests[idx];
     if (!quest || !hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest)) return;
-    const xpBeforeComplete = trainingXpState.strength?.xp ?? 0;
+    const xpBeforeComplete = trainingXpStateRef.current.strength?.xp ?? 0;
     const nextCompleted = [...completed];
     nextCompleted[idx] = true;
     setCompleted(nextCompleted);
     const questId = dailyQuests[idx]?.id;
     if (typeof questId === "number") {
       setRecentlyCompletedIds((prev) => ({ ...prev, [questId]: true }));
-      setRecentlyCompletedPathGain((prev) => ({ ...prev, [questId]: "+10 XP" }));
+      setRecentlyCompletedPathGain((prev) => ({ ...prev, [questId]: formatStrengthXpGain(10) }));
       window.setTimeout(() => {
         setRecentlyCompletedIds((prev) => ({ ...prev, [questId]: false }));
         setRecentlyCompletedPathGain((prev) => {
@@ -945,17 +1076,26 @@ export default function Dashboard() {
       }, 1200);
     }
 
-    applyTrainingXpDelta(10, { countDailySession: idx === 0 });
+    const { previousState, nextState: nextXpState } = applyTrainingXpDelta(10, { countDailySession: idx === 0 });
 
     let strongerThanLast = false;
     let strengthImproved = false;
     let liftedMore = false;
     let newPersonalBest = false;
     let weeklyImproving = false;
+    let volumeChangePercent: number | null = null;
     let weeklyVolumeTotal = 0;
     let strongestLiftLabel: string | null = null;
     if (idx === 0) {
       const exerciseLogs = buildExerciseLogEntriesForQuest(quest);
+      await logTrainingSessionToSupabase({
+        userId,
+        sessionType: "daily_protocol",
+        xpEarned: 10,
+        totalVolume: totalVolumeFromRows(exerciseLogs),
+        fatigueState: dailyReadiness,
+        exerciseLogs,
+      });
       if (exerciseLogs.length > 0) {
         await saveExerciseSessionLogs(exerciseLogs);
         setExerciseHistoryByName((prev) => {
@@ -988,6 +1128,9 @@ export default function Dashboard() {
             const lastSessionRows = previousRows.filter((r) => r.session_date === previousDate);
             const lastSessionVolume = totalVolumeFromRows(lastSessionRows);
             liftedMore = currentSessionVolume > lastSessionVolume;
+            if (lastSessionVolume > 0 && currentSessionVolume > lastSessionVolume) {
+              volumeChangePercent = Math.round(((currentSessionVolume - lastSessionVolume) / lastSessionVolume) * 100);
+            }
           }
 
           for (const row of exerciseLogs) {
@@ -1044,6 +1187,9 @@ export default function Dashboard() {
       const bumped = recordProtocolComplete(si);
       saveSystemIntegrityState(bumped);
       setSystemIntegrityScore(bumped.score);
+      await persistStrengthXpToSupabase(userId, nextXpState, { systemIntegrity: bumped.score });
+    } else {
+      await persistStrengthXpToSupabase(userId, nextXpState);
     }
 
     await supabase.from("daily_tasks").update({ completed: nextCompleted }).eq("id", dailyTaskId);
@@ -1079,12 +1225,21 @@ export default function Dashboard() {
         completed_all: true,
         streak: nextStreak,
       });
-      if (!effectivePro && getPathLevelFromXp(trainingXpState.strength?.xp ?? 0) >= FREE_MAX_PATH_LEVEL) {
+      if (!effectivePro && getPathLevelFromXp(trainingXpStateRef.current.strength?.xp ?? 0) >= FREE_MAX_PATH_LEVEL) {
         window.setTimeout(() => setProConversionModalOpen(true), 0);
       }
     }
 
     if (idx === 0) {
+      setUndoCompletion({
+        kind: "daily",
+        dateKey: getLocalDateKey(),
+        questId: quest.id,
+        previousXpState: previousState,
+        previousCompleted: [...completed],
+        xpAwarded: 10,
+        allDoneBeforeUndo: allDone,
+      });
       if (typeof window !== "undefined" && !window.localStorage.getItem(FIRST_SYSTEM_MOMENT_STORAGE_KEY)) {
         firstSystemMomentPendingRef.current = true;
       }
@@ -1097,6 +1252,13 @@ export default function Dashboard() {
         liftedMore,
         newPersonalBest,
         weeklyImproving,
+        volumeChangePercent,
+        progressMessages: pickProgressMessages({
+          strengthImproved,
+          liftedMore,
+          newPersonalBest,
+          volumeChangePercent,
+        }),
         weeklyVolume: Math.round(weeklyVolumeTotal),
         strongestLift: strongestLiftLabel,
       });
@@ -1113,92 +1275,113 @@ export default function Dashboard() {
     }
   };
 
-  const openTrainingSession = () => {
-    if (!effectivePro) return;
-    const pathLevel = getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
-    const pool = getStrengthTrainingPoolForPathLevel(pathLevel, { isPaidUser: true });
-    const dailyTitle = dailyQuests[0]?.title ?? "";
-    const filtered = pool.filter((e) => e.title !== dailyTitle);
-    const usePool = filtered.length > 0 ? filtered : pool;
-    const rows = usePool.map((entry, i) => ({
-      entry,
-      id: SESSION_QUEST_ID_BASE + i,
-    }));
-    setSessionOptions(rows);
-    setSessionExecutedById({});
-    setSessionActiveQuest(null);
-    setTrainingSessionOpen(true);
-    if (userId) {
-      logUserEvent(userId, USER_EVENT_TYPES.SESSION_STARTED, {});
+  const handleRefreshDailySession = async () => {
+    if (!userId || !dailyTaskId || dailyQuests.length === 0 || completed[0] || refreshesLeftToday <= 0) return;
+    const today = getLocalDateKey();
+    const [y, m, d] = today.split("-").map(Number);
+    const localDate = new Date(y, m - 1, d);
+    const currentQuest = dailyQuests[0];
+    const currentSession = identifyGymSessionForDateAndSteps(localDate, currentQuest.steps);
+    const replacementBase = getGymSessionRefreshForDate(
+      localDate,
+      currentSession?.id ?? getGymSessionForDate(localDate).id
+    );
+    const weekMon = mondayDateKeyForLocalWeekContaining(today);
+    const weekSun = sundayDateKeyFromMonday(weekMon);
+    const weekVolumeRows = await fetchExerciseVolumeRowsForRange(userId, weekMon, weekSun);
+    const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
+    const refreshed = createDailyQuests([], trainingXpState, today, effectivePro, weeklyVolume, replacementBase, trainingLevel);
+    const currentSteps = JSON.stringify(currentQuest.steps);
+    const nextSteps = JSON.stringify(refreshed[0]?.steps ?? []);
+    if (currentSteps === nextSteps) return;
+    const nextRefreshCount = dailyRefreshCount + 1;
+    setDailyQuests(refreshed);
+    setDailyRefreshCount(nextRefreshCount);
+    setExpandedQuestIds({});
+    setProtocolStepChecks({});
+    await supabase
+      .from("daily_tasks")
+      .update({ tasks: refreshed, daily_refresh_count: nextRefreshCount })
+      .eq("id", dailyTaskId);
+  };
+
+  const regenerateTodaySessionForTrainingLevel = async (nextLevel: TrainingLevel) => {
+    if (!userId || !dailyTaskId || dailyQuests.length === 0 || completed[0]) return;
+    const today = getLocalDateKey();
+    const [y, m, d] = today.split("-").map(Number);
+    const localDate = new Date(y, m - 1, d);
+    const currentQuest = dailyQuests[0];
+    const currentSession = identifyGymSessionForDateAndSteps(localDate, currentQuest.steps);
+    const weekMon = mondayDateKeyForLocalWeekContaining(today);
+    const weekSun = sundayDateKeyFromMonday(weekMon);
+    const weekVolumeRows = await fetchExerciseVolumeRowsForRange(userId, weekMon, weekSun);
+    const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
+    const regenerated = createDailyQuests(
+      [],
+      trainingXpStateRef.current,
+      today,
+      effectivePro,
+      weeklyVolume,
+      currentSession,
+      nextLevel
+    );
+    setDailyQuests(regenerated);
+    setExpandedQuestIds({});
+    setProtocolStepChecks({});
+    await supabase.from("daily_tasks").update({ tasks: regenerated }).eq("id", dailyTaskId);
+  };
+
+  const updateTrainingLevelSetting = async (nextLevel: TrainingLevel, opts?: { applyToToday?: boolean }) => {
+    if (trainingLevelSaving) return;
+    setTrainingLevel(nextLevel);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, nextLevel);
+    }
+    setTrainingLevelSaving(true);
+    try {
+      if (userId) {
+        await supabase.from("profiles").update({ training_level: nextLevel }).eq("id", userId);
+      }
+      if (opts?.applyToToday) {
+        await regenerateTodaySessionForTrainingLevel(nextLevel);
+        setTrainingLevelNotice("Applied to today's session.");
+      } else {
+        setTrainingLevelNotice("Applies to your next generated session.");
+      }
+      window.setTimeout(() => setTrainingLevelNotice(null), 2600);
+    } finally {
+      setTrainingLevelSaving(false);
     }
   };
 
-  useEffect(() => {
-    if (effectivePro) return;
-    setTrainingSessionOpen(false);
-    setSessionOptions([]);
-    setSessionActiveQuest(null);
-    setSessionExecutedById({});
-  }, [effectivePro]);
-
-  const handleSessionProtocolExecute = async (quest: DailyQuest) => {
-    if (sessionExecutedById[quest.id]) return;
-    if (!hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest) || !hasAllExerciseInputsForQuest(quest)) return;
-    const exerciseLogs = buildExerciseLogEntriesForQuest(quest);
-    if (exerciseLogs.length > 0) {
-      await saveExerciseSessionLogs(exerciseLogs);
-      setExerciseHistoryByName((prev) => {
-        const next = { ...prev };
-        for (const row of exerciseLogs) {
-          next[normalizeExerciseName(row.exercise_name)] = {
-            exercise_name: row.exercise_name,
-            last_weight: row.last_weight,
-            last_reps: row.last_reps,
-            sets_completed: row.sets_completed,
-            session_date: row.session_date,
-            effort_rating: row.effort_rating,
-            recent_efforts: [row.effort_rating],
-          };
-        }
-        return next;
-      });
-    }
-    setSessionExecutedById((prev) => ({ ...prev, [quest.id]: true }));
-    applyTrainingXpDelta(SESSION_PROTOCOL_XP);
-    setRecentlyCompletedIds((prev) => ({ ...prev, [quest.id]: true }));
-    setRecentlyCompletedPathGain((prev) => ({ ...prev, [quest.id]: `+${SESSION_PROTOCOL_XP} XP` }));
-    window.setTimeout(() => {
-      setRecentlyCompletedIds((prev) => ({ ...prev, [quest.id]: false }));
-      setRecentlyCompletedPathGain((prev) => {
-        const next = { ...prev };
-        delete next[quest.id];
-        return next;
-      });
-    }, 1200);
+  const canUndoQuestCompletion = (questId: number) => {
+    if (!undoCompletion || undoCompletion.dateKey !== getLocalDateKey()) return false;
+    return undoCompletion.kind === "daily" && undoCompletion.questId === questId;
   };
 
-  const endTrainingSession = () => {
-    const extraCount = Object.values(sessionExecutedById).filter(Boolean).length;
-    const sessionStartedAt = trainingSessionStartedAtRef.current;
-    trainingSessionStartedAtRef.current = null;
-    const sessionLengthSeconds =
-      sessionStartedAt != null ? Math.max(0, Math.round((Date.now() - sessionStartedAt) / 1000)) : undefined;
-    if (userId) {
-      logUserEvent(userId, USER_EVENT_TYPES.SESSION_COMPLETED, {
-        extra_protocols_completed: extraCount,
-        strength_level: strengthLevelForEvents(),
-        ...(sessionLengthSeconds != null ? { session_length_seconds: sessionLengthSeconds } : {}),
-      });
+  const handleUndoCompletion = async (mode: { kind: "daily"; idx: number }) => {
+    if (!userId || !undoCompletion || undoCompletion.dateKey !== getLocalDateKey()) return;
+    if (undoCompletion.kind !== "daily") return;
+    const nextCompleted = [...undoCompletion.previousCompleted];
+    setCompleted(nextCompleted);
+    setProtocolCompletionFeedback(null);
+    setUnlockNotification(`Undo completion · -${undoCompletion.xpAwarded} Strength XP`);
+    window.setTimeout(() => setUnlockNotification(null), 2000);
+    applyTrainingXpState(undoCompletion.previousXpState);
+    await persistStrengthXpToSupabase(userId, undoCompletion.previousXpState, { systemIntegrity: systemIntegrityScore });
+    if (dailyTaskId) {
+      await supabase.from("daily_tasks").update({ completed: nextCompleted }).eq("id", dailyTaskId);
     }
-    if (extraCount >= 1) {
-      applyTrainingXpDelta(SESSION_COMPLETION_BONUS_XP);
-      setUnlockNotification(`Session ended · +${SESSION_COMPLETION_BONUS_XP} bonus XP`);
-      window.setTimeout(() => setUnlockNotification(null), 2800);
+    if (undoCompletion.allDoneBeforeUndo) {
+      const nextStreak = Math.max(0, currentStreak - 1);
+      setWeeklySessionsCount((w) => Math.max(0, w - 1));
+      setCurrentStreak(nextStreak);
+      await supabase.from("profiles").update({ current_streak: nextStreak }).eq("id", userId);
+      await supabase
+        .from("history")
+        .upsert({ user_id: userId, date: getLocalDateKey(), xp_earned: 0, completed_all: false, streak: nextStreak });
     }
-    setTrainingSessionOpen(false);
-    setSessionOptions([]);
-    setSessionActiveQuest(null);
-    setSessionExecutedById({});
+    setUndoCompletion(null);
   };
 
   const toggleProtocol = (questId: number, stepCount: number) => {
@@ -1215,8 +1398,7 @@ export default function Dashboard() {
   };
   const handleStartProtocol = (
     quest: DailyQuest,
-    stepCount: number,
-    mode: { kind: "daily" | "session" }
+    stepCount: number
   ) => {
     const hasPrePromptEffects = getEffectsByType(quest, "pre_protocol_prompt").length > 0;
     if (hasPrePromptEffects && !prePromptSatisfiedByQuest[quest.id] && !expandedQuestIds[quest.id]) {
@@ -1225,7 +1407,7 @@ export default function Dashboard() {
     }
     if (!expandedQuestIds[quest.id] && userId) {
       logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_STARTED, {
-        scope: mode.kind,
+        scope: "daily",
         quest_id: quest.id,
         protocol_title: quest.title,
         strength_level: strengthLevelForEvents(),
@@ -1243,17 +1425,13 @@ export default function Dashboard() {
     });
   };
 
-  const renderProtocolBlock = (quest: DailyQuest, mode: { kind: "daily"; idx: number } | { kind: "session" }) => {
-    const readinessForQuest: ReadinessLevel = mode.kind === "daily" && mode.idx === 0 ? dailyReadiness : "normal";
+  const renderProtocolBlock = (quest: DailyQuest, mode: { kind: "daily"; idx: number }) => {
+    const readinessForQuest: ReadinessLevel = mode.idx === 0 ? readinessForTrainingLevel(dailyReadiness, trainingLevel) : "normal";
     const effectiveQuest = readinessForQuest === "normal" ? quest : applyReadinessAdjustments(quest, readinessForQuest);
-    const isDone = mode.kind === "daily" ? completed[mode.idx] : Boolean(sessionExecutedById[quest.id]);
-    const xpFallback = mode.kind === "daily" ? "+10 XP" : `+${SESSION_PROTOCOL_XP} XP`;
+    const isDone = completed[mode.idx];
+    const xpFallback = formatStrengthXpGain(10);
     const onExecute = () => {
-      if (mode.kind === "daily") {
-        void handleComplete(mode.idx);
-      } else {
-        void handleSessionProtocolExecute(quest);
-      }
+      void handleComplete(mode.idx);
     };
     const details = getProtocolDetailFromQuest(effectiveQuest);
     const isRecentlyCompleted = Boolean(recentlyCompletedIds[quest.id]);
@@ -1316,11 +1494,20 @@ export default function Dashboard() {
               Complete required prompts, tracker inputs, and exercise load/rep logs before execute.
             </p>
           )}
+          {isDone && canUndoQuestCompletion(quest.id) && (
+            <button
+              type="button"
+              className="text-center text-[11px] text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
+              onClick={() => void handleUndoCompletion({ kind: "daily", idx: mode.idx })}
+            >
+              Undo completion
+            </button>
+          )}
           {!isDone && (
             <button
               type="button"
               className="text-center text-xs text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
-              onClick={() => handleStartProtocol(effectiveQuest, renderedSteps.length, mode)}
+              onClick={() => handleStartProtocol(effectiveQuest, renderedSteps.length)}
             >
               {expandedQuestIds[quest.id] ? "Hide training protocol" : "Training protocol details"}
             </button>
@@ -1354,7 +1541,7 @@ export default function Dashboard() {
                   setPrePromptSatisfiedByQuest((prev) => ({ ...prev, [effectiveQuest.id]: true }));
                   if (userId) {
                     logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_STARTED, {
-                      scope: mode.kind,
+                      scope: "daily",
                       quest_id: effectiveQuest.id,
                       protocol_title: effectiveQuest.title,
                       strength_level: strengthLevelForEvents(),
@@ -1430,7 +1617,8 @@ export default function Dashboard() {
                 <p className="text-xs font-medium text-zinc-300">Exercise progression log</p>
                 <p className="mt-1 text-[11px] text-zinc-500">Double progression: hit top reps across sets, then add weight.</p>
                 <div className="mt-3 space-y-3">
-                  {exerciseSpecs.map((spec) => {
+                  {exerciseSpecs.map((spec, idx) => {
+                    const intentLabel = getExerciseIntentLabel(spec.name, idx);
                     const normalized = normalizeExerciseName(spec.name);
                     const last = exerciseHistoryByName[normalized] ?? null;
                     const weightKey = getExerciseInputKey(effectiveQuest.id, spec.name, "weight");
@@ -1438,15 +1626,25 @@ export default function Dashboard() {
                     const setsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "sets");
                     const effortKey = getExerciseInputKey(effectiveQuest.id, spec.name, "effort");
                     const selectedEffort = getEffectInput(effectiveQuest.id, effortKey);
-                    const effortUnlocked = questPathLevel >= ADVANCED_UNLOCK_LEVEL;
+                    const effortUnlocked = trainingLevel === "advanced";
                     return (
                       <div key={`${effectiveQuest.id}-${normalized}`} className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
-                        <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-400">
+                            {intentLabel}
+                          </span>
+                        </div>
                         <p className="mt-1 text-[11px] text-zinc-500">
                           {last ? `Last time: ${formatLastPerformance(last)}` : "Last time: no history yet"}
                         </p>
                         <p className="mt-1 text-[11px] text-emerald-400/90">
-                          {getDoubleProgressionTarget(spec, last, readinessForQuest)}
+                          {getDoubleProgressionTarget(
+                            spec,
+                            last,
+                            readinessForQuest,
+                            progressionSpeedForTrainingLevel(trainingLevel)
+                          )}
                         </p>
                         <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
                           <input
@@ -1493,7 +1691,7 @@ export default function Dashboard() {
                           </div>
                         ) : (
                           <p className="mt-2 text-[11px] text-zinc-600">
-                            Advanced unlock at Level {ADVANCED_UNLOCK_LEVEL}: effort-based autoregulation.
+                            Effort-based autoregulation is available on advanced training level.
                           </p>
                         )}
                       </div>
@@ -1626,7 +1824,7 @@ export default function Dashboard() {
     );
   };
 
-  if (!isReady) return <LoadingScreen label="Loading…" />;
+  if (!isReady || !xpResolved) return <LoadingScreen label="Loading…" />;
 
   if (showOnboarding) {
     const isFinalStep = onboardingStep === ONBOARDING_STEPS.length - 1;
@@ -1640,12 +1838,38 @@ export default function Dashboard() {
             <h1 className="mt-5 text-3xl font-semibold tracking-tight text-zinc-50 md:text-4xl">
               {ONBOARDING_STEPS[onboardingStep]}
             </h1>
+            {isFinalStep && (
+              <div className="mx-auto mt-6 w-full max-w-sm text-left">
+                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">What is your training level?</p>
+                <div className="mt-3 grid grid-cols-1 gap-2">
+                  {(["beginner", "intermediate", "advanced"] as const).map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => setTrainingLevel(lvl)}
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
+                        trainingLevel === lvl
+                          ? "border-zinc-400 bg-zinc-100 text-zinc-900"
+                          : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
+                      }`}
+                    >
+                      {trainingLevelLabel(lvl)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <button
               className="mx-auto mt-10 w-full max-w-sm rounded-full border border-zinc-500 bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 transition-all duration-200 hover:border-zinc-300 hover:bg-white"
-              onClick={() => {
+              onClick={async () => {
                 if (!isFinalStep) {
                   setOnboardingStep((step) => Math.min(step + 1, ONBOARDING_STEPS.length - 1));
                   return;
+                }
+                window.localStorage.setItem(TRAINING_LEVEL_STORAGE_KEY, trainingLevel);
+                const user = await getCurrentUser();
+                if (user) {
+                  await supabase.from("profiles").update({ training_level: trainingLevel }).eq("id", user.id);
                 }
                 window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
                 setShowOnboarding(false);
@@ -1680,6 +1904,9 @@ export default function Dashboard() {
     .filter((u) => u.levelRequirement > effUnlockLevel)
     .sort((a, b) => a.levelRequirement - b.levelRequirement)
     .slice(1, 3);
+  const todayForProgramWeek = new Date();
+  const programWeek = getProgramWeekInfo(todayForProgramWeek);
+  const effectiveDailyReadiness = readinessForTrainingLevel(dailyReadiness, trainingLevel);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -1695,24 +1922,20 @@ export default function Dashboard() {
                 <p className="mt-2 text-sm leading-relaxed text-zinc-500">{STREAK_CHAIN_REMINDER}</p>
               </div>
             )}
-            {protocolCompletionFeedback.stronger && (
-              <p className="mt-5 text-sm font-medium leading-relaxed text-emerald-500/85">
-                {STRONGER_THAN_LAST_SESSION_LINE}
-              </p>
-            )}
-            {protocolCompletionFeedback.strengthImproved && (
-              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">
-                Strength improved — more weight or reps on at least one lift.
-              </p>
-            )}
-            {protocolCompletionFeedback.liftedMore && (
-              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">You lifted more than last time.</p>
-            )}
-            {protocolCompletionFeedback.newPersonalBest && (
-              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">New personal best.</p>
-            )}
-            {protocolCompletionFeedback.weeklyImproving && (
-              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">Weekly progress improving.</p>
+            {protocolCompletionFeedback.progressMessages.length > 0 ? (
+              <div className="mt-5 space-y-2">
+                {protocolCompletionFeedback.progressMessages.map((message) => (
+                  <p key={message} className="text-sm font-medium leading-relaxed text-emerald-400/85">
+                    {message}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              protocolCompletionFeedback.stronger && (
+                <p className="mt-5 text-sm font-medium leading-relaxed text-emerald-500/85">
+                  {STRONGER_THAN_LAST_SESSION_LINE}
+                </p>
+              )
             )}
             <div className="mt-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-2.5">
               <p className="text-[11px] text-zinc-400">Total volume this week: {protocolCompletionFeedback.weeklyVolume.toLocaleString()}</p>
@@ -1721,13 +1944,16 @@ export default function Dashboard() {
               )}
             </div>
             {!effectivePro && (
-              <button
-                type="button"
-                className="mt-4 text-xs font-medium text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline"
-                onClick={() => setProConversionModalOpen(true)}
-              >
-                Unlock Full System
-              </button>
+              <div className="mt-4">
+                <p className="text-xs text-zinc-500">You're making progress. Unlock the full system to keep it going.</p>
+                <button
+                  type="button"
+                  className="mt-2 text-xs font-medium text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline"
+                  onClick={() => setProConversionModalOpen(true)}
+                >
+                  Unlock Full System
+                </button>
+              </div>
             )}
             <button
               type="button"
@@ -1952,13 +2178,77 @@ export default function Dashboard() {
                   </button>
                 ))}
               </div>
-              {(dailyReadiness === "fresh" || dailyReadiness === "tired") && (
-                <p className="mt-2 text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
+              {(effectiveDailyReadiness === "fresh" || effectiveDailyReadiness === "tired") && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
+                  <p className="text-[10px] text-zinc-500">{readinessFeedbackLine(effectiveDailyReadiness)}</p>
+                </div>
               )}
             </div>
           )}
+          <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-zinc-300">Training Level</p>
+              <p className="text-[10px] text-zinc-500">{trainingLevelLabel(trainingLevel)}</p>
+            </div>
+            <p className="mt-1 text-[10px] text-zinc-500">This changes how challenging your sessions are.</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {(["beginner", "intermediate", "advanced"] as const).map((lvl) => (
+                <button
+                  key={lvl}
+                  type="button"
+                  disabled={trainingLevelSaving}
+                  onClick={() => void updateTrainingLevelSetting(lvl)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    trainingLevel === lvl
+                      ? "border-zinc-400 bg-zinc-100 text-zinc-900"
+                      : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
+                  }`}
+                >
+                  {trainingLevelLabel(lvl)}
+                </button>
+              ))}
+            </div>
+            {!completed[0] && dailyQuests.length > 0 && (
+              <button
+                type="button"
+                disabled={trainingLevelSaving}
+                onClick={() => void updateTrainingLevelSetting(trainingLevel, { applyToToday: true })}
+                className="mt-2 text-[10px] text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
+              >
+                Apply to today&apos;s session
+              </button>
+            )}
+            {trainingLevelNotice && <p className="mt-2 text-[10px] text-zinc-500">{trainingLevelNotice}</p>}
+          </div>
 
           <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's Training</h2>
+          <p className="mb-2 text-[11px] text-zinc-400">
+            Week {programWeek.weekNumber} - {programWeek.intent}
+          </p>
+          <div className="mb-3 space-y-1">
+            <p className="text-[11px] text-zinc-400">You're on Week {programWeek.weekNumber} of your system.</p>
+            <p className="text-[10px] text-zinc-500">
+              {weeklySessionsCount >= 2 ? "Your training is progressing." : "Stay consistent. Your training is progressing."}
+            </p>
+            <p className="text-[10px] text-zinc-600">Your system is evolving.</p>
+          </div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="text-[10px] text-zinc-500">Refreshes left today: {refreshesLeftToday}</p>
+            <button
+              type="button"
+              onClick={() => void handleRefreshDailySession()}
+              disabled={refreshesLeftToday <= 0 || completed[0] || dailyQuests.length === 0}
+              className={`rounded-full border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                refreshesLeftToday <= 0 || completed[0] || dailyQuests.length === 0
+                  ? "cursor-not-allowed border-zinc-800 bg-zinc-900 text-zinc-600"
+                  : "border-zinc-600 bg-zinc-900 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100"
+              }`}
+            >
+              Refresh Session
+            </button>
+          </div>
+          {refreshesLeftToday <= 0 && <p className="mb-3 text-[10px] text-zinc-600">No refreshes left today.</p>}
           <p className="mb-1 text-[11px] leading-relaxed text-zinc-500">
             This session works by progressive overload: add a little more load, reps, or quality over time.
           </p>
@@ -1989,61 +2279,25 @@ export default function Dashboard() {
           <ul className="flex flex-col gap-4">
             {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
           </ul>
-          {dailyQuests.length > 0 && completed[0] && !trainingSessionOpen && (
-            <div className="mt-6">
-              <button
-                type="button"
-                onClick={() => (effectivePro ? openTrainingSession() : setProConversionModalOpen(true))}
-                className="w-full rounded-xl border border-emerald-500/25 bg-emerald-950/15 py-3 text-sm font-semibold text-emerald-100/95 transition-colors hover:border-emerald-400/40 hover:bg-emerald-950/30"
-              >
-                Continue training
-              </button>
-            </div>
-          )}
-          {trainingSessionOpen && (
-            <div className="mt-8 rounded-xl border border-zinc-800/90 bg-zinc-900/25 px-4 py-5">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Training session</p>
-              <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                Add protocols from your unlocked pool. {SESSION_PROTOCOL_XP} XP each · end the session for +{SESSION_COMPLETION_BONUS_XP} bonus XP after at least one extra protocol.
-              </p>
-              <div className="mt-4 flex flex-col gap-2">
-                {sessionOptions.map(({ entry, id }) => {
-                  const active = sessionActiveQuest?.id === id;
-                  const done = Boolean(sessionExecutedById[id]);
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setSessionActiveQuest(poolEntryToDailyQuest(entry, id))}
-                      className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
-                        active
-                          ? "border-emerald-500/35 bg-emerald-950/20 text-zinc-100"
-                          : done
-                            ? "border-zinc-700/80 bg-zinc-900/40 text-zinc-500"
-                            : "border-zinc-800 bg-zinc-950/30 text-zinc-300 hover:border-zinc-600"
-                      }`}
-                    >
-                      <span className="font-medium">{entry.title}</span>
-                      {done ? <span className="ml-2 text-xs text-emerald-500/90">Executed</span> : null}
-                    </button>
-                  );
-                })}
+          {dailyQuests.length > 0 && completed[0] && (
+            <div className="mt-6 space-y-3">
+              <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 px-4 py-3">
+                <p className="text-sm font-semibold text-emerald-100/95">Session Complete</p>
+                <p className="mt-1 text-[11px] text-emerald-200/80">
+                  Today&apos;s structured training is done. XP, progression, and logs are finalized.
+                </p>
               </div>
-              {sessionActiveQuest ? (
-                <div className="mt-6">
-                  <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Active protocol</p>
-                  <ul className="flex flex-col gap-4">{renderProtocolBlock(sessionActiveQuest, { kind: "session" })}</ul>
-                </div>
-              ) : (
-                <p className="mt-5 text-center text-xs text-zinc-600">Select a protocol to run it.</p>
-              )}
-              <button
-                type="button"
-                onClick={endTrainingSession}
-                className="mt-6 w-full rounded-lg border border-zinc-700 bg-zinc-900/80 py-2.5 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-800"
-              >
-                End training session
-              </button>
+              <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/25 px-4 py-3">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Optional Conditioning</p>
+                <p className="mt-1 text-[11px] text-zinc-500">Optional 10-20 min easy cardio. Not tied to XP or progression.</p>
+                <button
+                  type="button"
+                  onClick={() => setOptionalConditioningDone((prev) => !prev)}
+                  className="mt-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[11px] text-zinc-300 transition-colors hover:border-zinc-600"
+                >
+                  {optionalConditioningDone ? "Conditioning logged (optional)" : "Mark optional conditioning done"}
+                </button>
+              </div>
             </div>
           )}
           <p className="mt-8 text-center text-xs text-zinc-600">

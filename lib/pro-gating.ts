@@ -26,11 +26,11 @@ export type ProFeatureDebugLine = { id: string; label: string; state: "locked" |
 
 export function getProFeatureDebugLines(effectivePro: boolean): ProFeatureDebugLine[] {
   return [
-    { id: "pools", label: "Expanded exercise depth + optional work", state: effectivePro ? "unlocked" : "locked" },
+    { id: "coaching", label: "Enhanced coaching and adaptation intelligence", state: effectivePro ? "unlocked" : "locked" },
     { id: "xp", label: `XP beyond L${FREE_MAX_PATH_LEVEL}`, state: effectivePro ? "unlocked" : "locked" },
     { id: "sessions", label: "Faster level-up pacing (2 vs 3 sessions)", state: effectivePro ? "unlocked" : "locked" },
-    { id: "extra", label: "Extra training session after daily", state: effectivePro ? "unlocked" : "locked" },
-    { id: "depth", label: "Progression depth tuning at each level", state: effectivePro ? "unlocked" : "locked" },
-    { id: "split", label: "Accelerated split progression and load progression", state: effectivePro ? "unlocked" : "locked" },
+    { id: "depth", label: "Deeper progression intelligence and insights", state: effectivePro ? "unlocked" : "locked" },
+    { id: "fatigue", label: "Higher-fidelity fatigue optimization", state: effectivePro ? "unlocked" : "locked" },
+    { id: "insights", label: "Advanced tracking and outcome insights", state: effectivePro ? "unlocked" : "locked" },
   ];
 }
