@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import AscendLogo from "@/components/ascend-logo";
 import {
   PRO_CTA_EMAIL_HINT,
+  PRO_CTA_PRICE_HINT,
   PRO_LOCKED_BODY_LEAD,
   PRO_LOCKED_BODY_PREFIX,
   PRO_LOCKED_BULLETS,
@@ -55,6 +56,7 @@ export default function ProLockedCard({ variant = "standard", className = "", no
       >
         {proUnlockCtaLabel(EARLY_ACCESS_PRICE_LABEL)}
       </a>
+      <p className="mt-2 text-center text-[11px] leading-snug text-zinc-600">{PRO_CTA_PRICE_HINT}</p>
       <p className="mt-3 text-center text-[11px] leading-snug text-zinc-600">{PRO_CTA_EMAIL_HINT}</p>
       <div className="mt-4 flex justify-center border-t border-zinc-800/80 pt-4">
         <RefreshAccessButton />

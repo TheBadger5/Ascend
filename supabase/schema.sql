@@ -65,14 +65,30 @@ create table if not exists public.user_events (
   created_at timestamp with time zone default now()
 );
 
+create table if not exists public.exercise_history (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  exercise_name text not null,
+  last_weight numeric not null,
+  last_reps jsonb not null,
+  sets_completed integer not null,
+  effort_rating text not null,
+  session_date date not null,
+  created_at timestamp with time zone default now()
+);
+alter table public.exercise_history add column if not exists effort_rating text;
+
 create index if not exists user_events_user_id_created_at_idx
   on public.user_events (user_id, created_at desc);
+create index if not exists exercise_history_user_exercise_date_idx
+  on public.exercise_history (user_id, exercise_name, session_date desc);
 
 alter table public.profiles enable row level security;
 alter table public.daily_tasks enable row level security;
 alter table public.history enable row level security;
 alter table public.weekly_reviews enable row level security;
 alter table public.user_events enable row level security;
+alter table public.exercise_history enable row level security;
 
 drop policy if exists "profiles_owner_select" on public.profiles;
 drop policy if exists "profiles_owner_insert" on public.profiles;
@@ -131,6 +147,13 @@ drop policy if exists "user_events_owner_select" on public.user_events;
 create policy "user_events_owner_insert" on public.user_events
   for insert with check (auth.uid() = user_id);
 create policy "user_events_owner_select" on public.user_events
+  for select using (auth.uid() = user_id);
+
+drop policy if exists "exercise_history_owner_insert" on public.exercise_history;
+drop policy if exists "exercise_history_owner_select" on public.exercise_history;
+create policy "exercise_history_owner_insert" on public.exercise_history
+  for insert with check (auth.uid() = user_id);
+create policy "exercise_history_owner_select" on public.exercise_history
   for select using (auth.uid() = user_id);
 
 /**

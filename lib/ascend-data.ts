@@ -1,6 +1,5 @@
 "use client";
 
-import { loadBaselineOverlay } from "@/lib/baseline-local-overlay";
 import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 
@@ -12,15 +11,6 @@ export type ProfileRow = {
   best_streak: number;
   /** Pro access — set in Supabase (`is_paid_user`), e.g. via Gumroad webhook. */
   is_paid_user?: boolean;
-  /** Day 1 baseline tests (max reps; plank_time in seconds, optional). */
-  pushups_max?: number | null;
-  squats_max?: number | null;
-  plank_time?: number | null;
-  /** Latest re-test (defaults to baseline until updated on Progress). */
-  current_pushups_max?: number | null;
-  current_squats_max?: number | null;
-  current_plank_time?: number | null;
-  baseline_completed_at?: string | null;
 };
 
 export type DailyTasksRow = {
@@ -47,13 +37,7 @@ export const getCurrentUser = async () => {
   return user;
 };
 
-function mergeBaselineOverlay(userId: string, row: ProfileRow): ProfileRow {
-  const overlay = loadBaselineOverlay(userId);
-  if (!overlay) return row;
-  return { ...row, ...overlay };
-}
-
-/** Only columns guaranteed on minimal `profiles` before baseline migrations (PostgREST rejects unknown keys). */
+/** Only core columns required by the current progression model. */
 function coreProfileUpsertPayload(userId: string) {
   return {
     id: userId,
@@ -71,18 +55,7 @@ export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> =>
   });
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).single();
   if (!error && data) {
-    const base = data as ProfileRow;
-    const withDefaults: ProfileRow = {
-      ...base,
-      pushups_max: base.pushups_max ?? null,
-      squats_max: base.squats_max ?? null,
-      plank_time: base.plank_time ?? null,
-      current_pushups_max: base.current_pushups_max ?? null,
-      current_squats_max: base.current_squats_max ?? null,
-      current_plank_time: base.current_plank_time ?? null,
-      baseline_completed_at: base.baseline_completed_at ?? null,
-    };
-    return mergeBaselineOverlay(userId, withDefaults);
+    return data as ProfileRow;
   }
   const fallback: ProfileRow = {
     id: userId,
@@ -91,13 +64,6 @@ export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> =>
     current_streak: 0,
     best_streak: 0,
     is_paid_user: false,
-    pushups_max: null,
-    squats_max: null,
-    plank_time: null,
-    current_pushups_max: null,
-    current_squats_max: null,
-    current_plank_time: null,
-    baseline_completed_at: null,
   };
   const upsertPayload = coreProfileUpsertPayload(userId);
   logProfileTableDebug("ascend-data:getOrCreateProfile", "upsert", {
@@ -105,5 +71,5 @@ export const getOrCreateProfile = async (userId: string): Promise<ProfileRow> =>
     upsertKeys: Object.keys(upsertPayload),
   });
   await supabase.from("profiles").upsert(upsertPayload);
-  return mergeBaselineOverlay(userId, fallback);
+  return fallback;
 };

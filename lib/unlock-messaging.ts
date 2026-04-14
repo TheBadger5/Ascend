@@ -13,28 +13,28 @@ export function xpToReachUnlockThreshold(levelRequirement: number, currentXp: nu
 }
 
 const PREVIEW_PHRASE: Record<string, string> = {
-  "Movement focus": "movement focus — intent before you load the bar",
-  "Workout tracking": "lift tracking — this is where real progress starts",
-  "Structured workout templates": "structured workouts — a written set scheme before you lift",
-  "Split week training": "split-week training — lower, upper, full rotation",
-  Autoregulation: "autoregulation — intensity matched to readiness",
+  Foundation: "foundation programming — compound-first, repeatable sessions",
+  Progression: "progression block — added volume and exercise depth",
+  Intensity: "intensity block — heavier ranges and advanced loading",
+  Optimisation: "optimisation — fatigue control and planned deloads",
+  Advanced: "advanced system — full auto-regulated progression",
 };
 
 const UNLOCK_MOMENT: Record<string, string> = {
-  "Movement focus": "Unlocked: you declare your focus before the work. No drifting.",
-  "Workout tracking": "You can now track your lifts — this is where real progress starts.",
-  "Structured workout templates": "Unlocked: you write the plan before the first heavy set.",
-  "Split week training": "Unlocked: weekly structure — train the week, not just the day.",
-  Autoregulation: "Unlocked: adjust load by readiness. Discipline includes judgment.",
+  Foundation: "Unlocked: Foundation — your core weekly strength system is now active.",
+  Progression: "Unlocked: Progression — more productive volume and exercise variety.",
+  Intensity: "Unlocked: Intensity — heavier targets and advanced progression methods.",
+  Optimisation: "Unlocked: Optimisation — fatigue management and deload controls.",
+  Advanced: "Unlocked: Advanced — full auto-regulated progression system.",
 };
 
 /** Greyed card — why it matters while still locked. */
 const LOCKED_TEASER: Record<string, string> = {
-  "Movement focus": "You’ll name the main movement before the protocol — focus before volume.",
-  "Workout tracking": "Session log for load and reps — accountability for every working set.",
-  "Structured workout templates": "A set scheme step before your first working set — no guessing.",
-  "Split week training": "Lower / upper / full rotation across the week — structure at scale.",
-  Autoregulation: "Readiness-based intensity — hard training without wrecking recovery.",
+  Foundation: "Reliable baseline program: compounds first, accessories second, repeat weekly.",
+  Progression: "More exercises and volume to drive measurable adaptation each week.",
+  Intensity: "Heavier rep bands plus progression methods for key lifts.",
+  Optimisation: "Automatic fatigue controls and deload timing to protect recovery.",
+  Advanced: "Full system: readiness + effort-informed progression and autoregulation.",
 };
 
 export function unlockLevelPreviewLine(unlock: PathUnlock): string {

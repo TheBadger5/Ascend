@@ -23,6 +23,34 @@ export type ReadinessAdjustableQuest = {
   task?: string;
 };
 
+function adjustSetLabel(label: string, readiness: ReadinessLevel): string {
+  const m = label.match(/(\d+)(?:\s*-\s*(\d+))?\s*sets?/i);
+  if (!m) return label;
+  const min = Number.parseInt(m[1] ?? "0", 10);
+  const max = m[2] ? Number.parseInt(m[2], 10) : min;
+  if (!Number.isFinite(min) || min <= 0 || !Number.isFinite(max) || max <= 0) return label;
+  if (readiness === "fresh") {
+    const nextMin = min + 1;
+    const nextMax = max + 1;
+    return label.replace(m[0], `${nextMin === nextMax ? nextMin : `${nextMin}-${nextMax}`} sets`);
+  }
+  if (readiness === "tired") {
+    const nextMin = Math.max(1, min - 1);
+    const nextMax = Math.max(nextMin, max - 1);
+    return label.replace(m[0], `${nextMin === nextMax ? nextMin : `${nextMin}-${nextMax}`} sets`);
+  }
+  return label;
+}
+
+function applyReadinessToStep(step: string, readiness: ReadinessLevel): string {
+  if (readiness === "normal") return step;
+  const withSets = adjustSetLabel(step, readiness);
+  if (readiness === "fresh") {
+    return `${withSets} · target load +2-3%`;
+  }
+  return `${withSets} · target load -5-8%`;
+}
+
 function storageKey(dateKey: string): string {
   return `${READINESS_STORAGE_PREFIX}${dateKey}`;
 }
@@ -61,6 +89,7 @@ export function applyReadinessAdjustments(
   if (readiness === "fresh") {
     return {
       ...quest,
+      steps: quest.steps.map((s) => applyReadinessToStep(s, "fresh")),
       instruction:
         "Readiness: fresh — bias slightly harder today. " +
         quest.instruction,
@@ -74,6 +103,7 @@ export function applyReadinessAdjustments(
   }
   return {
     ...quest,
+    steps: quest.steps.map((s) => applyReadinessToStep(s, "tired")),
     instruction:
       "Readiness: tired — ease volume today. " + quest.instruction,
     minimum:

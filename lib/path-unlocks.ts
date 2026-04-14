@@ -5,13 +5,14 @@ export type UnlockEffectType =
   | "ui_modifier"
   | "protocol_enhancer"
   | "autoregulation"
-  /** Metadata only — weekly lower/upper/full split activates at this level (see `weekly-training.ts`). */
-  | "training_split_unlock";
+  | "training_split_unlock"
+  /** Metadata-only training milestone for progression messaging. */
+  | "training_progression";
 
 export type PathUnlock = {
   title: string;
   description: string;
-  levelRequirement: 3 | 5 | 7 | 10 | 15;
+  levelRequirement: number;
   pathId: string;
   effectType: UnlockEffectType;
   effectConfig: Record<string, unknown>;
@@ -20,47 +21,50 @@ export type PathUnlock = {
 const unlocks = (pathId: string, entries: Array<Omit<PathUnlock, "pathId">>): PathUnlock[] =>
   entries.map((entry) => ({ ...entry, pathId }));
 
-/** Strength path: each unlock gates meaningful training capability, not cosmetics. */
+/** Strength path: level milestones follow real programming progression, not UI features. */
 export const PATH_UNLOCKS_BY_PATH: Record<string, PathUnlock[]> = {
   strength_training: unlocks("strength_training", [
     {
+      levelRequirement: 1,
+      title: "Foundation",
+      description: "Basic weekly gym plan with core compounds and repeatable session structure.",
+      effectType: "training_progression",
+      effectConfig: { stage: "foundation" },
+    },
+    {
+      levelRequirement: 2,
+      title: "Progression",
+      description: "Increased exercise variety and higher productive volume for faster adaptation.",
+      effectType: "training_split_unlock",
+      effectConfig: { stage: "progression" },
+    },
+    {
       levelRequirement: 3,
-      title: "Movement focus",
-      description: "You must name a primary focus movement before opening the full protocol.",
-      effectType: "pre_protocol_prompt",
+      title: "Intensity",
+      description: "Heavier loading ranges and advanced progression methods on priority lifts.",
+      effectType: "protocol_enhancer",
       effectConfig: {
-        prompt: "Select your focus movement for this session (e.g. squat, hinge, bench, pull).",
+        stage: "intensity",
+        additionalStep: "For your top lift, complete one controlled top set, then two back-off sets at 90-92% load.",
+      },
+    },
+    {
+      levelRequirement: 4,
+      title: "Optimisation",
+      description: "Fatigue management and deload sequencing are automatically integrated.",
+      effectType: "ui_modifier",
+      effectConfig: {
+        stage: "optimisation",
+        hint: "Deload and fatigue controls are active this phase — quality reps over grind reps.",
       },
     },
     {
       levelRequirement: 5,
-      title: "Workout tracking",
-      description: "Log load and reps for your working sets—required to execute when unlocked.",
-      effectType: "input_tracker",
-      effectConfig: { prompt: "Session log", fields: ["Lift / exercise", "Sets × reps", "Load"] },
-    },
-    {
-      levelRequirement: 7,
-      title: "Structured workout templates",
-      description: "Adds a written set scheme step before your first working set.",
-      effectType: "protocol_enhancer",
-      effectConfig: {
-        additionalStep: "Before your first working set, write your full set scheme (sets × reps @ target load).",
-      },
-    },
-    {
-      levelRequirement: 10,
-      title: "Split week training",
-      description: "Unlocks the weekly lower / upper / full rotation (push–pull–legs style structure).",
-      effectType: "training_split_unlock",
-      effectConfig: {},
-    },
-    {
-      levelRequirement: 15,
-      title: "Autoregulation",
-      description: "Adjust session intensity based on readiness.",
+      title: "Advanced",
+      description: "Full auto-regulated system: readiness + effort-driven load progression.",
       effectType: "autoregulation",
       effectConfig: {
+        stage: "advanced",
         prompt: "Adjust today’s session intensity",
         options: ["Reduce volume", "Maintain plan", "Push progression"],
       },
@@ -68,10 +72,13 @@ export const PATH_UNLOCKS_BY_PATH: Record<string, PathUnlock[]> = {
   ]),
 };
 
-export const MOVEMENT_FOCUS_UNLOCK_LEVEL = 3;
-export const WORKOUT_TRACKING_UNLOCK_LEVEL = 5;
-export const STRUCTURED_TEMPLATES_UNLOCK_LEVEL = 7;
-export const SPLIT_TRAINING_UNLOCK_LEVEL = 10;
+export const FOUNDATION_UNLOCK_LEVEL = 1;
+export const PROGRESSION_UNLOCK_LEVEL = 2;
+export const INTENSITY_UNLOCK_LEVEL = 3;
+export const OPTIMISATION_UNLOCK_LEVEL = 4;
+export const ADVANCED_UNLOCK_LEVEL = 5;
+/** Backward-compatible alias used in existing weekly training logic. */
+export const SPLIT_TRAINING_UNLOCK_LEVEL = PROGRESSION_UNLOCK_LEVEL;
 
 export const getPathUnlocks = (pathId: string): PathUnlock[] => PATH_UNLOCKS_BY_PATH[pathId] ?? [];
 

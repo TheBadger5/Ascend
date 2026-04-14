@@ -14,7 +14,7 @@ export function requireProAccess(isPaidReady: boolean, isPaidUser: boolean): boo
 }
 
 /**
- * Caps path level for unlock eligibility so free users never receive L7+ path effects
+ * Caps path level for unlock eligibility so free users do not bypass the free progression cap
  * even if local XP is inflated.
  */
 export function effectiveLevelForPathUnlocks(pathLevel: number, effectivePro: boolean): number {
@@ -26,11 +26,11 @@ export type ProFeatureDebugLine = { id: string; label: string; state: "locked" |
 
 export function getProFeatureDebugLines(effectivePro: boolean): ProFeatureDebugLine[] {
   return [
-    { id: "pools", label: "Tier-locked protocol pool", state: effectivePro ? "unlocked" : "locked" },
+    { id: "pools", label: "Expanded exercise depth + optional work", state: effectivePro ? "unlocked" : "locked" },
     { id: "xp", label: `XP beyond L${FREE_MAX_PATH_LEVEL}`, state: effectivePro ? "unlocked" : "locked" },
-    { id: "sessions", label: "Faster level-up sessions (2 vs 3)", state: effectivePro ? "unlocked" : "locked" },
+    { id: "sessions", label: "Faster level-up pacing (2 vs 3 sessions)", state: effectivePro ? "unlocked" : "locked" },
     { id: "extra", label: "Extra training session after daily", state: effectivePro ? "unlocked" : "locked" },
-    { id: "depth", label: "Path unlock depth (L7+ effects)", state: effectivePro ? "unlocked" : "locked" },
-    { id: "split", label: "Weekly split focus (lower/upper)", state: effectivePro ? "unlocked" : "locked" },
+    { id: "depth", label: "Progression depth tuning at each level", state: effectivePro ? "unlocked" : "locked" },
+    { id: "split", label: "Accelerated split progression and load progression", state: effectivePro ? "unlocked" : "locked" },
   ];
 }

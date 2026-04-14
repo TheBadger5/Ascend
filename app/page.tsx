@@ -25,9 +25,12 @@ import {
 } from "@/lib/pro-conversion-copy";
 import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
 import {
+  ADVANCED_UNLOCK_LEVEL,
   getActivePathUnlocks,
   getNewlyUnlockedForLevel,
   getNextStrengthUnlock,
+  INTENSITY_UNLOCK_LEVEL,
+  OPTIMISATION_UNLOCK_LEVEL,
   getPathUnlocks,
   SPLIT_TRAINING_UNLOCK_LEVEL,
   type PathUnlock,
@@ -36,16 +39,32 @@ import {
   findStrengthTaskByTitle,
   getStrengthBeltFromPathLevel,
   getStrengthTrainingPoolForPathLevel,
-  getStrengthTrainingPoolForPathLevelAndFocus,
   strengthTaskTitleIsProOnly,
   STRENGTH_BELT_LABELS,
   type StrengthTaskPoolEntry,
 } from "@/lib/strength-progression";
+import { applySessionVolumeScale, getGymSessionForDate, getTodayTrainingHeadline, toExerciseStep } from "@/lib/weekly-gym-program";
 import {
-  getEffectiveTrainingFocus,
-  getTodayFocusHeadline,
-  parseLocalDateKey,
-} from "@/lib/weekly-training";
+  fetchExerciseVolumeRowsForRange,
+  fetchExercisePerformanceRowsForNames,
+  fetchExercisePerformanceRowsForRange,
+  fetchLatestExerciseHistory,
+  formatLastPerformance,
+  getDoubleProgressionTarget,
+  getExerciseLogVolume,
+  normalizeExerciseName,
+  parseExerciseSpecsFromSteps,
+  parseRepsCsv,
+  saveExerciseSessionLogs,
+  type EffortRating,
+  type ExerciseHistoryRow,
+  type ExerciseSessionLogInsert,
+} from "@/lib/exercise-progression";
+import {
+  calculateWeeklyVolumeByMuscle,
+  getSessionAutoAdjustment,
+  type WeeklyVolumeByMuscle,
+} from "@/lib/volume-fatigue";
 import {
   PROTOCOL_COMPLETION_CONTEXT,
   PROTOCOL_COMPLETION_HEADLINE,
@@ -80,9 +99,7 @@ import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 import { logUserEvent, USER_EVENT_TYPES } from "@/lib/user-events";
 import ProLockedCard from "@/components/pro-locked-card";
-import BaselineSession from "./baseline-session";
 import LoadingScreen from "./loading-screen";
-import { hasCompletedBaseline, improvementLines, protocolScalingHint } from "@/lib/baseline-metrics";
 import { effectiveLevelForPathUnlocks } from "@/lib/pro-gating";
 import {
   getStrengthRank,
@@ -125,6 +142,22 @@ const STRENGTH_PATH_ID = STRENGTH_UNLOCK_PATH_ID;
 const SESSION_PROTOCOL_XP = 10;
 const SESSION_COMPLETION_BONUS_XP = 15;
 const SESSION_QUEST_ID_BASE = 2000;
+const PRO_PROGRESS_MOMENT_PROMPT_KEY = "ascend.pro-progress-prompt.v1";
+const EMPTY_WEEKLY_VOLUME: WeeklyVolumeByMuscle = {
+  chest: 0,
+  back: 0,
+  shoulders: 0,
+  quads: 0,
+  hamstrings_glutes: 0,
+  arms: 0,
+  core: 0,
+};
+const EFFORT_OPTIONS: Array<{ value: EffortRating; label: string }> = [
+  { value: "easy", label: "Easy" },
+  { value: "moderate", label: "Moderate" },
+  { value: "hard", label: "Hard" },
+  { value: "very_hard", label: "Very Hard" },
+];
 
 const poolEntryToDailyQuest = (entry: StrengthTaskPoolEntry, id: number): DailyQuest => ({
   id,
@@ -156,6 +189,10 @@ type DailyQuest = {
 type TaskDetail = { instruction: string; steps: string[]; whyItMatters: string; insight: string; examples: string[]; minimumViable: string };
 type TaskPoolEntry = { title: string; instruction: string; steps: string[]; why: string; insight: string; examples: string[]; minimum: string };
 type QuestEffectInputState = Record<number, Record<string, string>>;
+type ExerciseInputField = "weight" | "reps" | "sets" | "effort";
+
+const getExerciseInputKey = (questId: number, exerciseName: string, field: ExerciseInputField): string =>
+  `exercise:${questId}:${normalizeExerciseName(exerciseName)}:${field}`;
 
 const hasStructuredQuestShape = (value: unknown): value is DailyQuest => {
   if (!value || typeof value !== "object") return false;
@@ -294,34 +331,64 @@ const getLocalDateKey = () => {
 const dayDiff = (a: string, b: string) =>
   Math.floor((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000);
 
+const tightenRepRange = (label: string): string => {
+  const m = label.match(/(\d+)\s*-\s*(\d+)/);
+  if (!m) return label;
+  const lo = Number.parseInt(m[1] ?? "0", 10);
+  const hi = Number.parseInt(m[2] ?? "0", 10);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo <= 0 || hi <= lo) return label;
+  const nextLo = Math.max(2, lo - 1);
+  const nextHi = Math.max(nextLo + 1, hi - 2);
+  return label.replace(m[0], `${nextLo}-${nextHi}`);
+};
+
 const createDailyQuests = (
   previous: DailyQuest[] = [],
   trainingXp: TrainingXpState = createEmptyTrainingXp(),
   dateKey: string = getLocalDateKey(),
-  isPaidUser = false
+  isPaidUser = false,
+  weeklyVolume: WeeklyVolumeByMuscle = EMPTY_WEEKLY_VOLUME
 ): DailyQuest[] => {
-  const previousTitle = previous[0]?.title ?? previous[0]?.task ?? "";
+  void previous;
   const pathLevel = getPathLevelFromXp(trainingXp.strength?.xp ?? 0);
-  const focus = getEffectiveTrainingFocus(parseLocalDateKey(dateKey), pathLevel, {
-    forceFreeTierSchedule: !isPaidUser,
-  });
-  const pool = getStrengthTrainingPoolForPathLevelAndFocus(pathLevel, focus, { isPaidUser });
-  const filtered = pool.filter((item) => item.title !== previousTitle);
-  const candidates = filtered.length > 0 ? filtered : pool;
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const localDate = new Date(y, m - 1, d);
+  const base = getGymSessionForDate(localDate);
+  let session = base;
+  if (pathLevel < SPLIT_TRAINING_UNLOCK_LEVEL) {
+    session = { ...session, exercises: session.exercises.slice(0, 4) };
+  }
+  if (pathLevel >= INTENSITY_UNLOCK_LEVEL) {
+    session = {
+      ...session,
+      exercises: session.exercises.map((e, idx) => (idx < 2 ? { ...e, reps: tightenRepRange(e.reps) } : e)),
+    };
+  }
+  const auto =
+    pathLevel >= OPTIMISATION_UNLOCK_LEVEL
+      ? getSessionAutoAdjustment(localDate, session, weeklyVolume)
+      : { volumeScale: 1, intensityScale: 1, deloadWeek: false, overThreshold: false };
+  const paidAccelerationScale = isPaidUser && pathLevel >= SPLIT_TRAINING_UNLOCK_LEVEL && auto.volumeScale >= 0.99 ? 1.1 : 1;
+  const adjustedSession = applySessionVolumeScale(session, auto.volumeScale * paidAccelerationScale);
+  const instructionNote =
+    auto.intensityScale < 0.99
+      ? ` Use roughly ${Math.round(auto.intensityScale * 100)}% of your normal load today.`
+      : isPaidUser && pathLevel >= SPLIT_TRAINING_UNLOCK_LEVEL
+        ? " Pro pacing active: small volume boost while progression remains stable."
+        : "";
   return [
     {
       id: 1,
       category: "Strength",
       path: STRENGTH_PATH_ID,
-      title: chosen.title,
-      instruction: chosen.instruction,
-      steps: chosen.steps,
-      why: chosen.why,
-      examples: chosen.examples,
-      minimum: chosen.minimum,
-      insight: chosen.insight,
-      task: chosen.title,
+      title: adjustedSession.title,
+      instruction: `${adjustedSession.instruction}${instructionNote}`,
+      steps: adjustedSession.exercises.map(toExerciseStep),
+      why: adjustedSession.why,
+      examples: adjustedSession.exercises.map((e) => `${e.name}: ${e.sets} x ${e.reps}`),
+      minimum: adjustedSession.minimum,
+      insight: `${adjustedSession.insight}${auto.deloadWeek ? " Deload week active: reduced sets and slightly lighter loading." : ""}`,
+      task: adjustedSession.title,
     },
   ];
 };
@@ -348,11 +415,18 @@ export default function Dashboard() {
     streak: number;
     streakLine: string | null;
     stronger: boolean;
+    strengthImproved: boolean;
+    liftedMore: boolean;
+    newPersonalBest: boolean;
+    weeklyImproving: boolean;
+    weeklyVolume: number;
+    strongestLift: string | null;
   } | null>(null);
   const [unlockNotification, setUnlockNotification] = useState<string | null>(null);
   const [pendingPrePromptQuestId, setPendingPrePromptQuestId] = useState<number | null>(null);
   const [prePromptSatisfiedByQuest, setPrePromptSatisfiedByQuest] = useState<Record<number, boolean>>({});
   const [effectInputsByQuest, setEffectInputsByQuest] = useState<QuestEffectInputState>({});
+  const [exerciseHistoryByName, setExerciseHistoryByName] = useState<Record<string, ExerciseHistoryRow>>({});
   const [focusTimerSecondsByQuest, setFocusTimerSecondsByQuest] = useState<Record<number, number>>({});
   const [focusTimerRunningByQuest, setFocusTimerRunningByQuest] = useState<Record<number, boolean>>({});
   const [trainingSessionOpen, setTrainingSessionOpen] = useState(false);
@@ -362,6 +436,10 @@ export default function Dashboard() {
   const [systemIntegrityScore, setSystemIntegrityScore] = useState(100);
   const [dailyReadiness, setDailyReadiness] = useState<ReadinessLevel>("normal");
   const [weeklySessionsCount, setWeeklySessionsCount] = useState(0);
+  const [weeklyStrengthStats, setWeeklyStrengthStats] = useState<{ totalVolume: number; strongestLift: string | null }>({
+    totalVolume: 0,
+    strongestLift: null,
+  });
   const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const [yesterdayDailyMissed, setYesterdayDailyMissed] = useState(false);
   const [yesterdayProtocolTitle, setYesterdayProtocolTitle] = useState<string | null>(null);
@@ -372,9 +450,8 @@ export default function Dashboard() {
   /** Wall-clock start of the extra training session UI (for `session_length_seconds`). */
   const trainingSessionStartedAtRef = useRef<number | null>(null);
   const firstSystemMomentPendingRef = useRef(false);
+  const progressUpgradePromptPendingRef = useRef(false);
   const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
-  const [showBaselineSession, setShowBaselineSession] = useState(false);
-  const [profileSnapshot, setProfileSnapshot] = useState<ProfileRow | null>(null);
   const [proConversionModalOpen, setProConversionModalOpen] = useState(false);
   const [firstSystemMomentOpen, setFirstSystemMomentOpen] = useState(false);
 
@@ -423,18 +500,15 @@ export default function Dashboard() {
 
         if (!user) {
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
-          setProfileSnapshot(null);
           return;
         }
         if (!profile) return;
-        setProfileSnapshot(profile);
         setUserId(user.id);
-        if (!hasCompletedBaseline(profile)) {
-          setShowBaselineSession(true);
-          return;
-        }
-        setShowBaselineSession(false);
         const today = getLocalDateKey();
+        const weekMonForVolume = mondayDateKeyForLocalWeekContaining(today);
+        const weekSunForVolume = sundayDateKeyFromMonday(weekMonForVolume);
+        const weekVolumeRows = await fetchExerciseVolumeRowsForRange(user.id, weekMonForVolume, weekSunForVolume);
+        const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
 
         const { data: todayRow } = await supabase
           .from("daily_tasks")
@@ -478,7 +552,7 @@ export default function Dashboard() {
           );
           const firstTitle = singleTasks[0]?.title ?? singleTasks[0]?.task ?? "";
           if (!resolvedPaid && firstTitle && strengthTaskTitleIsProOnly(firstTitle)) {
-            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false);
+            const regenerated = createDailyQuests(previousTasks, trainingXpForDaily, today, false, weeklyVolume);
             singleTasks = regenerated;
             singleCompleted = Array.from({ length: regenerated.length }, () => false);
             await supabase
@@ -499,7 +573,7 @@ export default function Dashboard() {
               .eq("id", todayRow.id);
           }
         } else {
-          const generated = createDailyQuests(previousTasks, trainingXpForDaily, today, resolvedPaid);
+          const generated = createDailyQuests(previousTasks, trainingXpForDaily, today, resolvedPaid, weeklyVolume);
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
             .from("daily_tasks")
@@ -582,6 +656,19 @@ export default function Dashboard() {
           if (wSingle[0]) weekCompleted += 1;
         }
         setWeeklySessionsCount(weekCompleted);
+        const weekPerfRows = await fetchExercisePerformanceRowsForRange(user.id, weekMon, weekSun);
+        const weekVolume = Math.round(totalVolumeFromRows(weekPerfRows));
+        const strongest = weekPerfRows.reduce<{ exercise: string; weight: number } | null>(
+          (best, row) => {
+            if (!best || row.last_weight > best.weight) return { exercise: row.exercise_name, weight: row.last_weight };
+            return best;
+          },
+          null
+        );
+        setWeeklyStrengthStats({
+          totalVolume: weekVolume,
+          strongestLift: strongest ? `${strongest.exercise} (${strongest.weight}kg)` : null,
+        });
       } finally {
         setIsReady(true);
       }
@@ -611,7 +698,7 @@ export default function Dashboard() {
   }, [isReady, loadVersion]);
 
   useEffect(() => {
-    if (!isPaidReady || !isReady || showOnboarding || showBaselineSession) return;
+    if (!isPaidReady || !isReady || showOnboarding) return;
     const prev = loadStrengthIdentitySnapshot();
     const rank = getStrengthRank(level);
     const notice = nextIdentityNotice(prev, level);
@@ -620,7 +707,24 @@ export default function Dashboard() {
     setIdentityNotice(notice);
     const t = window.setTimeout(() => setIdentityNotice(null), 5200);
     return () => window.clearTimeout(t);
-  }, [isPaidReady, isReady, level, showOnboarding, showBaselineSession]);
+  }, [isPaidReady, isReady, level, showOnboarding]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const quests = sessionActiveQuest ? [...dailyQuests, sessionActiveQuest] : dailyQuests;
+    const names = quests.flatMap((q) => getQuestExerciseSpecs(q).map((s) => s.name));
+    if (names.length === 0) return;
+    let cancelled = false;
+    const load = async () => {
+      const latest = await fetchLatestExerciseHistory(userId, names);
+      if (cancelled) return;
+      setExerciseHistoryByName((prev) => ({ ...prev, ...latest }));
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [dailyQuests, sessionActiveQuest, userId]);
 
   const xpInCurrentLevel = totalXP % 100;
   const levelProgressPercent = xpInCurrentLevel;
@@ -678,6 +782,70 @@ export default function Dashboard() {
         return Boolean(getEffectInput(quest.id, fieldKey).trim());
       });
     });
+  };
+
+  const getQuestExerciseSpecs = (quest: DailyQuest) => parseExerciseSpecsFromSteps(getProtocolDetailFromQuest(quest).steps);
+
+  const hasAllExerciseInputsForQuest = (quest: DailyQuest) => {
+    const specs = getQuestExerciseSpecs(quest);
+    if (specs.length === 0) return true;
+    const requiresEffort = getQuestPathLevel(quest) >= ADVANCED_UNLOCK_LEVEL;
+    return specs.every((spec) => {
+      const weight = Number.parseFloat(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "weight")));
+      const reps = parseRepsCsv(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "reps")));
+      const setsRaw = getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "sets")).trim();
+      const sets = setsRaw ? Number.parseInt(setsRaw, 10) : reps.length;
+      const effortRaw = getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "effort")).trim().toLowerCase();
+      const effortValid =
+        effortRaw === "easy" || effortRaw === "moderate" || effortRaw === "hard" || effortRaw === "very_hard";
+      return (
+        Number.isFinite(weight) &&
+        weight > 0 &&
+        reps.length > 0 &&
+        Number.isFinite(sets) &&
+        sets > 0 &&
+        (!requiresEffort || effortValid)
+      );
+    });
+  };
+
+  const buildExerciseLogEntriesForQuest = (quest: DailyQuest): ExerciseSessionLogInsert[] => {
+    if (!userId) return [];
+    const sessionDate = getLocalDateKey();
+    const specs = getQuestExerciseSpecs(quest);
+    const requiresEffort = getQuestPathLevel(quest) >= ADVANCED_UNLOCK_LEVEL;
+    const rows: ExerciseSessionLogInsert[] = [];
+    for (const spec of specs) {
+      const weight = Number.parseFloat(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "weight")));
+      const reps = parseRepsCsv(getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "reps")));
+      const setsRaw = getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "sets")).trim();
+      const setsCompleted = setsRaw ? Number.parseInt(setsRaw, 10) : reps.length;
+      const effortRaw = getEffectInput(quest.id, getExerciseInputKey(quest.id, spec.name, "effort")).trim().toLowerCase();
+      const effort =
+        effortRaw === "easy" || effortRaw === "moderate" || effortRaw === "hard" || effortRaw === "very_hard"
+          ? (effortRaw as EffortRating)
+          : ("moderate" as EffortRating);
+      if (
+        !Number.isFinite(weight) ||
+        weight <= 0 ||
+        reps.length === 0 ||
+        !Number.isFinite(setsCompleted) ||
+        setsCompleted <= 0 ||
+        (requiresEffort && effort == null)
+      ) {
+        continue;
+      }
+      rows.push({
+        user_id: userId,
+        exercise_name: spec.name,
+        last_weight: Number(weight.toFixed(2)),
+        last_reps: reps,
+        sets_completed: setsCompleted,
+        session_date: sessionDate,
+        effort_rating: effort,
+      });
+    }
+    return rows;
   };
 
   const applyTrainingXpDelta = (delta: number, opts?: { countDailySession?: boolean }) => {
@@ -752,6 +920,8 @@ export default function Dashboard() {
   }, [focusTimerRunningByQuest]);
 
   const strengthLevelForEvents = () => getPathLevelFromXp(trainingXpState.strength?.xp ?? 0);
+  const totalVolumeFromRows = (rows: Array<{ last_weight: number; last_reps: number[] }>) =>
+    rows.reduce((sum, row) => sum + getExerciseLogVolume(row.last_weight, row.last_reps), 0);
 
   const handleComplete = async (idx: number) => {
     if (!userId || dailyTaskId === null || completed[idx]) return;
@@ -778,7 +948,89 @@ export default function Dashboard() {
     applyTrainingXpDelta(10, { countDailySession: idx === 0 });
 
     let strongerThanLast = false;
+    let strengthImproved = false;
+    let liftedMore = false;
+    let newPersonalBest = false;
+    let weeklyImproving = false;
+    let weeklyVolumeTotal = 0;
+    let strongestLiftLabel: string | null = null;
     if (idx === 0) {
+      const exerciseLogs = buildExerciseLogEntriesForQuest(quest);
+      if (exerciseLogs.length > 0) {
+        await saveExerciseSessionLogs(exerciseLogs);
+        setExerciseHistoryByName((prev) => {
+          const next = { ...prev };
+          for (const row of exerciseLogs) {
+            next[normalizeExerciseName(row.exercise_name)] = {
+              exercise_name: row.exercise_name,
+              last_weight: row.last_weight,
+              last_reps: row.last_reps,
+              sets_completed: row.sets_completed,
+              session_date: row.session_date,
+              effort_rating: row.effort_rating,
+              recent_efforts: [row.effort_rating],
+            };
+          }
+          return next;
+        });
+        if (userId) {
+          const today = getLocalDateKey();
+          const lookbackStart = addDaysToDateKey(today, -35);
+          const exerciseNames = exerciseLogs.map((e) => e.exercise_name);
+          const historyForNames = await fetchExercisePerformanceRowsForNames(userId, exerciseNames);
+          const previousRows = await fetchExercisePerformanceRowsForRange(userId, lookbackStart, today);
+          const currentSessionVolume = totalVolumeFromRows(exerciseLogs);
+          const previousDates = Array.from(
+            new Set(previousRows.map((r) => r.session_date).filter((d) => d < today))
+          ).sort();
+          const previousDate = previousDates.length > 0 ? previousDates[previousDates.length - 1] : null;
+          if (previousDate) {
+            const lastSessionRows = previousRows.filter((r) => r.session_date === previousDate);
+            const lastSessionVolume = totalVolumeFromRows(lastSessionRows);
+            liftedMore = currentSessionVolume > lastSessionVolume;
+          }
+
+          for (const row of exerciseLogs) {
+            const historical = historyForNames.filter(
+              (h) => normalizeExerciseName(h.exercise_name) === normalizeExerciseName(row.exercise_name) && h.session_date < today
+            );
+            const latestPrior = historical
+              .sort((a, b) => b.session_date.localeCompare(a.session_date))[0] ?? null;
+            if (latestPrior) {
+              const priorTotalReps = latestPrior.last_reps.reduce((sum, r) => sum + r, 0);
+              const currentTotalReps = row.last_reps.reduce((sum, r) => sum + r, 0);
+              if (row.last_weight > latestPrior.last_weight || currentTotalReps > priorTotalReps) {
+                strengthImproved = true;
+              }
+            }
+            const priorMaxWeight = historical.reduce((m, h) => Math.max(m, h.last_weight), 0);
+            const priorMaxVol = historical.reduce((m, h) => Math.max(m, getExerciseLogVolume(h.last_weight, h.last_reps)), 0);
+            const rowVol = getExerciseLogVolume(row.last_weight, row.last_reps);
+            if (row.last_weight > priorMaxWeight || rowVol > priorMaxVol) {
+              newPersonalBest = true;
+              break;
+            }
+          }
+
+          const weekMon = mondayDateKeyForLocalWeekContaining(today);
+          const weekSun = sundayDateKeyFromMonday(weekMon);
+          const prevWeekMon = addDaysToDateKey(weekMon, -7);
+          const prevWeekSun = addDaysToDateKey(weekSun, -7);
+          const thisWeekRows = await fetchExercisePerformanceRowsForRange(userId, weekMon, weekSun);
+          const prevWeekRows = await fetchExercisePerformanceRowsForRange(userId, prevWeekMon, prevWeekSun);
+          weeklyVolumeTotal = totalVolumeFromRows(thisWeekRows);
+          const previousWeekVolume = totalVolumeFromRows(prevWeekRows);
+          weeklyImproving = weeklyVolumeTotal > previousWeekVolume && previousWeekVolume > 0;
+          const strongest = thisWeekRows.reduce<{ exercise: string; weight: number } | null>(
+            (best, row) => {
+              if (!best || row.last_weight > best.weight) return { exercise: row.exercise_name, weight: row.last_weight };
+              return best;
+            },
+            null
+          );
+          strongestLiftLabel = strongest ? `${strongest.exercise} (${strongest.weight}kg)` : null;
+        }
+      }
       const trackers = getEffectsByType(quest, "input_tracker");
       const collected = collectTrackerStringsFromQuest(quest.id, getEffectInput, trackers);
       if (collected) {
@@ -827,6 +1079,9 @@ export default function Dashboard() {
         completed_all: true,
         streak: nextStreak,
       });
+      if (!effectivePro && getPathLevelFromXp(trainingXpState.strength?.xp ?? 0) >= FREE_MAX_PATH_LEVEL) {
+        window.setTimeout(() => setProConversionModalOpen(true), 0);
+      }
     }
 
     if (idx === 0) {
@@ -838,7 +1093,23 @@ export default function Dashboard() {
         streak: streakAfterComplete,
         streakLine: formatStreakIdentityLine(streakAfterComplete),
         stronger: strongerThanLast,
+        strengthImproved,
+        liftedMore,
+        newPersonalBest,
+        weeklyImproving,
+        weeklyVolume: Math.round(weeklyVolumeTotal),
+        strongestLift: strongestLiftLabel,
       });
+      if (!effectivePro && (strengthImproved || liftedMore || newPersonalBest || weeklyImproving)) {
+        const prompted =
+          typeof window !== "undefined" && window.localStorage.getItem(PRO_PROGRESS_MOMENT_PROMPT_KEY) === "1";
+        if (!prompted) {
+          progressUpgradePromptPendingRef.current = true;
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(PRO_PROGRESS_MOMENT_PROMPT_KEY, "1");
+          }
+        }
+      }
     }
   };
 
@@ -870,9 +1141,28 @@ export default function Dashboard() {
     setSessionExecutedById({});
   }, [effectivePro]);
 
-  const handleSessionProtocolExecute = (quest: DailyQuest) => {
+  const handleSessionProtocolExecute = async (quest: DailyQuest) => {
     if (sessionExecutedById[quest.id]) return;
-    if (!hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest)) return;
+    if (!hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest) || !hasAllExerciseInputsForQuest(quest)) return;
+    const exerciseLogs = buildExerciseLogEntriesForQuest(quest);
+    if (exerciseLogs.length > 0) {
+      await saveExerciseSessionLogs(exerciseLogs);
+      setExerciseHistoryByName((prev) => {
+        const next = { ...prev };
+        for (const row of exerciseLogs) {
+          next[normalizeExerciseName(row.exercise_name)] = {
+            exercise_name: row.exercise_name,
+            last_weight: row.last_weight,
+            last_reps: row.last_reps,
+            sets_completed: row.sets_completed,
+            session_date: row.session_date,
+            effort_rating: row.effort_rating,
+            recent_efforts: [row.effort_rating],
+          };
+        }
+        return next;
+      });
+    }
     setSessionExecutedById((prev) => ({ ...prev, [quest.id]: true }));
     applyTrainingXpDelta(SESSION_PROTOCOL_XP);
     setRecentlyCompletedIds((prev) => ({ ...prev, [quest.id]: true }));
@@ -954,28 +1244,34 @@ export default function Dashboard() {
   };
 
   const renderProtocolBlock = (quest: DailyQuest, mode: { kind: "daily"; idx: number } | { kind: "session" }) => {
+    const readinessForQuest: ReadinessLevel = mode.kind === "daily" && mode.idx === 0 ? dailyReadiness : "normal";
+    const effectiveQuest = readinessForQuest === "normal" ? quest : applyReadinessAdjustments(quest, readinessForQuest);
     const isDone = mode.kind === "daily" ? completed[mode.idx] : Boolean(sessionExecutedById[quest.id]);
     const xpFallback = mode.kind === "daily" ? "+10 XP" : `+${SESSION_PROTOCOL_XP} XP`;
     const onExecute = () => {
       if (mode.kind === "daily") {
         void handleComplete(mode.idx);
       } else {
-        handleSessionProtocolExecute(quest);
+        void handleSessionProtocolExecute(quest);
       }
     };
-    const details = getProtocolDetailFromQuest(quest);
+    const details = getProtocolDetailFromQuest(effectiveQuest);
     const isRecentlyCompleted = Boolean(recentlyCompletedIds[quest.id]);
     const stepChecks = protocolStepChecks[quest.id] ?? [];
     const stepsCompleted = stepChecks.filter(Boolean).length;
-    const questPathLevel = getQuestPathLevel(quest);
-    const protocolReady = hasAllRequiredPrePrompts(quest) && hasAllTrackerInputsForQuest(quest);
-    const prePromptEffects = getEffectsByType(quest, "pre_protocol_prompt");
-    const postReflectionEffects = getEffectsByType(quest, "post_protocol_reflection");
-    const inputTrackerEffects = getEffectsByType(quest, "input_tracker");
-    const uiModifierEffects = getEffectsByType(quest, "ui_modifier");
-    const autoregulationEffects = getEffectsByType(quest, "autoregulation");
-    const enhancerSteps = getEnhancerSteps(quest);
+    const questPathLevel = getQuestPathLevel(effectiveQuest);
+    const protocolReady =
+      hasAllRequiredPrePrompts(effectiveQuest) &&
+      hasAllTrackerInputsForQuest(effectiveQuest) &&
+      hasAllExerciseInputsForQuest(effectiveQuest);
+    const prePromptEffects = getEffectsByType(effectiveQuest, "pre_protocol_prompt");
+    const postReflectionEffects = getEffectsByType(effectiveQuest, "post_protocol_reflection");
+    const inputTrackerEffects = getEffectsByType(effectiveQuest, "input_tracker");
+    const uiModifierEffects = getEffectsByType(effectiveQuest, "ui_modifier");
+    const autoregulationEffects = getEffectsByType(effectiveQuest, "autoregulation");
+    const enhancerSteps = getEnhancerSteps(effectiveQuest);
     const renderedSteps = [...details.steps, ...enhancerSteps];
+    const exerciseSpecs = parseExerciseSpecsFromSteps(details.steps);
     const protocolProgressPercent =
       renderedSteps.length > 0 ? Math.round((stepsCompleted / renderedSteps.length) * 100) : 0;
     const isProtocolOpen = Boolean(expandedQuestIds[quest.id]);
@@ -996,7 +1292,7 @@ export default function Dashboard() {
               {STRENGTH_BELT_LABELS[getStrengthBeltFromPathLevel(questPathLevel)]} · L{questPathLevel}
             </p>
             <p className={`mt-2 text-base font-medium leading-snug ${isDone ? "text-zinc-500 line-through" : "text-zinc-100"}`}>
-              {quest.title}
+              {effectiveQuest.title}
             </p>
             {isRecentlyCompleted && (
               <p className="mt-2 text-xs font-medium text-emerald-400/90">{recentlyCompletedPathGain[quest.id] ?? xpFallback}</p>
@@ -1017,20 +1313,20 @@ export default function Dashboard() {
           </button>
           {!isDone && !protocolReady && (
             <p className="text-center text-xs text-amber-400/95">
-              Unlock required to progress further — complete movement focus and session log above.
+              Complete required prompts, tracker inputs, and exercise load/rep logs before execute.
             </p>
           )}
           {!isDone && (
             <button
               type="button"
               className="text-center text-xs text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
-              onClick={() => handleStartProtocol(quest, renderedSteps.length, mode)}
+              onClick={() => handleStartProtocol(effectiveQuest, renderedSteps.length, mode)}
             >
               {expandedQuestIds[quest.id] ? "Hide training protocol" : "Training protocol details"}
             </button>
           )}
         </div>
-        {pendingPrePromptQuestId === quest.id && prePromptEffects.length > 0 && !expandedQuestIds[quest.id] && (
+        {pendingPrePromptQuestId === effectiveQuest.id && prePromptEffects.length > 0 && !expandedQuestIds[effectiveQuest.id] && (
           <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-900/60 px-3 py-3">
             <p className="text-xs text-zinc-300">Before you execute</p>
             <div className="mt-2 space-y-2">
@@ -1040,8 +1336,8 @@ export default function Dashboard() {
                   <div key={key}>
                     <p className="text-[11px] text-zinc-400">{getPromptFromConfig(unlock, "Provide input")}</p>
                     <input
-                      value={getEffectInput(quest.id, key)}
-                      onChange={(event) => setEffectInput(quest.id, key, event.target.value)}
+                      value={getEffectInput(effectiveQuest.id, key)}
+                      onChange={(event) => setEffectInput(effectiveQuest.id, key, event.target.value)}
                       className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
                     />
                   </div>
@@ -1052,20 +1348,20 @@ export default function Dashboard() {
               <button
                 type="button"
                 className="rounded-full border border-zinc-500 bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 disabled:cursor-not-allowed disabled:border-zinc-700 disabled:bg-zinc-800 disabled:text-zinc-400"
-                disabled={!hasAllRequiredPrePrompts(quest)}
+                disabled={!hasAllRequiredPrePrompts(effectiveQuest)}
                 onClick={() => {
                   setPendingPrePromptQuestId(null);
-                  setPrePromptSatisfiedByQuest((prev) => ({ ...prev, [quest.id]: true }));
+                  setPrePromptSatisfiedByQuest((prev) => ({ ...prev, [effectiveQuest.id]: true }));
                   if (userId) {
                     logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_STARTED, {
                       scope: mode.kind,
-                      quest_id: quest.id,
-                      protocol_title: quest.title,
+                      quest_id: effectiveQuest.id,
+                      protocol_title: effectiveQuest.title,
                       strength_level: strengthLevelForEvents(),
                       via: "pre_prompt_continue",
                     });
                   }
-                  toggleProtocol(quest.id, renderedSteps.length);
+                  toggleProtocol(effectiveQuest.id, renderedSteps.length);
                 }}
               >
                 Continue
@@ -1073,11 +1369,11 @@ export default function Dashboard() {
             </div>
           </div>
         )}
-        {expandedQuestIds[quest.id] && (
+        {expandedQuestIds[effectiveQuest.id] && (
           <div className="mt-4 border-t border-zinc-700/70 pt-4 text-sm text-zinc-300">
             {prePromptEffects.map((unlock) => {
               const key = `pre:${unlock.pathId}:${unlock.title}`;
-              const value = getEffectInput(quest.id, key);
+              const value = getEffectInput(effectiveQuest.id, key);
               if (!value) return null;
               return (
                 <p key={key} className="mb-2 rounded-lg border border-zinc-700/80 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
@@ -1129,6 +1425,83 @@ export default function Dashboard() {
                   {hint}
                 </p>
               ))}
+            {exerciseSpecs.length > 0 && (
+              <div className="mb-3 rounded-lg border border-zinc-700/80 bg-zinc-900/60 px-3 py-3">
+                <p className="text-xs font-medium text-zinc-300">Exercise progression log</p>
+                <p className="mt-1 text-[11px] text-zinc-500">Double progression: hit top reps across sets, then add weight.</p>
+                <div className="mt-3 space-y-3">
+                  {exerciseSpecs.map((spec) => {
+                    const normalized = normalizeExerciseName(spec.name);
+                    const last = exerciseHistoryByName[normalized] ?? null;
+                    const weightKey = getExerciseInputKey(effectiveQuest.id, spec.name, "weight");
+                    const repsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "reps");
+                    const setsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "sets");
+                    const effortKey = getExerciseInputKey(effectiveQuest.id, spec.name, "effort");
+                    const selectedEffort = getEffectInput(effectiveQuest.id, effortKey);
+                    const effortUnlocked = questPathLevel >= ADVANCED_UNLOCK_LEVEL;
+                    return (
+                      <div key={`${effectiveQuest.id}-${normalized}`} className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
+                        <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
+                        <p className="mt-1 text-[11px] text-zinc-500">
+                          {last ? `Last time: ${formatLastPerformance(last)}` : "Last time: no history yet"}
+                        </p>
+                        <p className="mt-1 text-[11px] text-emerald-400/90">
+                          {getDoubleProgressionTarget(spec, last, readinessForQuest)}
+                        </p>
+                        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                          <input
+                            value={getEffectInput(effectiveQuest.id, weightKey)}
+                            onChange={(event) => setEffectInput(effectiveQuest.id, weightKey, event.target.value)}
+                            placeholder="Weight (kg)"
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
+                          />
+                          <input
+                            value={getEffectInput(effectiveQuest.id, repsKey)}
+                            onChange={(event) => setEffectInput(effectiveQuest.id, repsKey, event.target.value)}
+                            placeholder="Reps per set (e.g. 8,7,6)"
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
+                          />
+                          <input
+                            value={getEffectInput(effectiveQuest.id, setsKey)}
+                            onChange={(event) => setEffectInput(effectiveQuest.id, setsKey, event.target.value)}
+                            placeholder="Sets completed"
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
+                          />
+                        </div>
+                        {effortUnlocked ? (
+                          <div className="mt-2">
+                            <p className="text-[11px] text-zinc-500">How hard was that?</p>
+                            <div className="mt-1.5 flex flex-wrap gap-2">
+                              {EFFORT_OPTIONS.map((opt) => {
+                                const active = selectedEffort === opt.value;
+                                return (
+                                  <button
+                                    key={`${normalized}-${opt.value}`}
+                                    type="button"
+                                    onClick={() => setEffectInput(effectiveQuest.id, effortKey, opt.value)}
+                                    className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                      active
+                                        ? "border-emerald-500/45 bg-emerald-950/30 text-emerald-100"
+                                        : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-2 text-[11px] text-zinc-600">
+                            Advanced unlock at Level {ADVANCED_UNLOCK_LEVEL}: effort-based autoregulation.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {inputTrackerEffects.map((unlock) => {
               const fields = getTrackerFields(unlock);
               const prefix = `tracker:${unlock.pathId}:${unlock.title}`;
@@ -1139,12 +1512,12 @@ export default function Dashboard() {
                   </p>
                   <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {fields.map((field) => {
-                      const fieldKey = `${prefix}:${field}`;
+                        const fieldKey = `${prefix}:${field}`;
                       return (
                         <input
                           key={fieldKey}
-                          value={getEffectInput(quest.id, fieldKey)}
-                          onChange={(event) => setEffectInput(quest.id, fieldKey, event.target.value)}
+                            value={getEffectInput(effectiveQuest.id, fieldKey)}
+                            onChange={(event) => setEffectInput(effectiveQuest.id, fieldKey, event.target.value)}
                           placeholder={field}
                           className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
                         />
@@ -1160,7 +1533,7 @@ export default function Dashboard() {
               const options = Array.isArray(raw)
                 ? raw.filter((o): o is string => typeof o === "string")
                 : ["Reduce volume", "Maintain plan", "Push progression"];
-              const choice = getEffectInput(quest.id, key);
+              const choice = getEffectInput(effectiveQuest.id, key);
               const hint =
                 choice === "Reduce volume"
                   ? "Today: remove one working set or use 5–10% less load. Prioritize crisp reps."
@@ -1174,7 +1547,7 @@ export default function Dashboard() {
                   <p className="text-xs text-zinc-300">{getPromptFromConfig(unlock, "Session adjustment")}</p>
                   <select
                     value={choice}
-                    onChange={(event) => setEffectInput(quest.id, key, event.target.value)}
+                    onChange={(event) => setEffectInput(effectiveQuest.id, key, event.target.value)}
                     className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
                   >
                     <option value="">Select intensity…</option>
@@ -1207,12 +1580,12 @@ export default function Dashboard() {
               <p className="text-zinc-500">Step-by-step</p>
               <ul className="mt-2 space-y-2">
                 {renderedSteps.map((step, stepIdx) => {
-                  const checked = protocolStepChecks[quest.id]?.[stepIdx] ?? false;
+                  const checked = protocolStepChecks[effectiveQuest.id]?.[stepIdx] ?? false;
                   return (
-                    <li key={`${quest.id}-${stepIdx}`} className="flex items-start gap-2">
+                    <li key={`${effectiveQuest.id}-${stepIdx}`} className="flex items-start gap-2">
                       <button
                         type="button"
-                        onClick={() => toggleProtocolStep(quest.id, stepIdx)}
+                        onClick={() => toggleProtocolStep(effectiveQuest.id, stepIdx)}
                         className={`mt-0.5 h-4 w-4 rounded border transition-colors ${
                           checked
                             ? "border-zinc-300 bg-zinc-200"
@@ -1241,8 +1614,8 @@ export default function Dashboard() {
               <div key={key} className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-900/60 px-3 py-3">
                 <p className="text-xs text-zinc-300">{getPromptFromConfig(unlock, "Reflect on this training protocol")}</p>
                 <textarea
-                  value={getEffectInput(quest.id, key)}
-                  onChange={(event) => setEffectInput(quest.id, key, event.target.value)}
+                  value={getEffectInput(effectiveQuest.id, key)}
+                  onChange={(event) => setEffectInput(effectiveQuest.id, key, event.target.value)}
                   className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
                   rows={3}
                 />
@@ -1287,27 +1660,10 @@ export default function Dashboard() {
     );
   }
 
-  if (showBaselineSession && userId) {
-    return (
-      <BaselineSession
-        userId={userId}
-        onComplete={() => {
-          setShowBaselineSession(false);
-          setLoadVersion((v) => v + 1);
-        }}
-      />
-    );
-  }
-
   if (!isPaidReady) {
     return <LoadingScreen label="Loading…" />;
   }
 
-  const baselineFeedback = improvementLines(profileSnapshot);
-  const protocolBaselineLine = protocolScalingHint(
-    profileSnapshot,
-    getPathLevelFromXp(trainingXpState.strength?.xp ?? 0)
-  );
   const strengthRank = getStrengthRank(level);
   const pressureStreakLine = streakPressureLine(currentStreak);
   const pathXp = trainingXpState.strength?.xp ?? 0;
@@ -1344,6 +1700,35 @@ export default function Dashboard() {
                 {STRONGER_THAN_LAST_SESSION_LINE}
               </p>
             )}
+            {protocolCompletionFeedback.strengthImproved && (
+              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">
+                Strength improved — more weight or reps on at least one lift.
+              </p>
+            )}
+            {protocolCompletionFeedback.liftedMore && (
+              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">You lifted more than last time.</p>
+            )}
+            {protocolCompletionFeedback.newPersonalBest && (
+              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">New personal best.</p>
+            )}
+            {protocolCompletionFeedback.weeklyImproving && (
+              <p className="mt-2 text-sm font-medium leading-relaxed text-emerald-400/85">Weekly progress improving.</p>
+            )}
+            <div className="mt-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-2.5">
+              <p className="text-[11px] text-zinc-400">Total volume this week: {protocolCompletionFeedback.weeklyVolume.toLocaleString()}</p>
+              {protocolCompletionFeedback.strongestLift && (
+                <p className="mt-1 text-[11px] text-zinc-400">Strongest lift: {protocolCompletionFeedback.strongestLift}</p>
+              )}
+            </div>
+            {!effectivePro && (
+              <button
+                type="button"
+                className="mt-4 text-xs font-medium text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline"
+                onClick={() => setProConversionModalOpen(true)}
+              >
+                Unlock Full System
+              </button>
+            )}
             <button
               type="button"
               className="mt-8 w-full rounded-full border border-zinc-600 bg-zinc-100 px-5 py-2.5 text-sm font-medium text-zinc-900 transition-colors duration-200 hover:border-zinc-400 hover:bg-white"
@@ -1352,6 +1737,10 @@ export default function Dashboard() {
                 if (firstSystemMomentPendingRef.current) {
                   firstSystemMomentPendingRef.current = false;
                   setFirstSystemMomentOpen(true);
+                }
+                if (!effectivePro && progressUpgradePromptPendingRef.current) {
+                  progressUpgradePromptPendingRef.current = false;
+                  setProConversionModalOpen(true);
                 }
               }}
             >
@@ -1487,18 +1876,14 @@ export default function Dashboard() {
               <p className="text-[11px] leading-relaxed text-zinc-500">{xpToNextRetentionLine}</p>
             )}
             <p className="text-[11px] leading-relaxed text-zinc-500">{formatWeeklyGoalLine(weeklySessionsCount)}</p>
+            <p className="text-[11px] leading-relaxed text-zinc-500">
+              Total volume this week: {weeklyStrengthStats.totalVolume.toLocaleString()}
+            </p>
+            {weeklyStrengthStats.strongestLift && (
+              <p className="text-[11px] leading-relaxed text-zinc-500">Strongest lift: {weeklyStrengthStats.strongestLift}</p>
+            )}
             <p className="text-[10px] leading-relaxed text-zinc-600">{STAY_CONSISTENT_REMINDER}</p>
           </div>
-
-          {baselineFeedback.length > 0 && (
-            <div className="mb-5 space-y-1.5 rounded-lg border border-emerald-900/35 bg-emerald-950/15 px-3 py-2.5">
-              {baselineFeedback.map((line) => (
-                <p key={line} className="text-[11px] leading-relaxed text-emerald-400/90">
-                  {line}
-                </p>
-              ))}
-            </div>
-          )}
 
           {isPaidReady && !isPaidUser && (
             <div className="mb-5">
@@ -1513,18 +1898,10 @@ export default function Dashboard() {
             </div>
           )}
 
-          <p className="mb-2 text-sm font-medium leading-snug text-zinc-200">
-            {getTodayFocusHeadline(
-              getEffectiveTrainingFocus(new Date(), getPathLevelFromXp(trainingXpState.strength?.xp ?? 0), {
-                forceFreeTierSchedule: !effectivePro,
-              })
-            )}
+          <p className="mb-2 text-sm font-medium leading-snug text-zinc-200">{getTodayTrainingHeadline(new Date())}</p>
+          <p className="mb-3 text-[11px] text-zinc-600">
+            Weekly structure rotates by weekday: Upper Push, Lower, Recovery, Upper Pull, Lower/Full, then recovery.
           </p>
-          {getPathLevelFromXp(trainingXpState.strength?.xp ?? 0) < SPLIT_TRAINING_UNLOCK_LEVEL && (
-            <p className="mb-3 text-[11px] text-zinc-600">
-              Until Level {SPLIT_TRAINING_UNLOCK_LEVEL}, each training day uses a full-body protocol.
-            </p>
-          )}
           {nextStrengthUnlock && (
             <div className="mb-4 space-y-2 border-b border-zinc-800/60 pb-4">
               {unlockAnticipation && (
@@ -1581,10 +1958,13 @@ export default function Dashboard() {
             </div>
           )}
 
-          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's Training Protocol</h2>
-          {protocolBaselineLine && (
-            <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">{protocolBaselineLine}</p>
-          )}
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's Training</h2>
+          <p className="mb-1 text-[11px] leading-relaxed text-zinc-500">
+            This session works by progressive overload: add a little more load, reps, or quality over time.
+          </p>
+          <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">
+            Exercises are chosen to cover your main patterns first, then accessories to build weak points.
+          </p>
           <div className="mb-4 space-y-2">
             {pressureStreakLine && (
               <p className="text-[11px] leading-relaxed text-zinc-500">{pressureStreakLine}</p>
@@ -1607,12 +1987,7 @@ export default function Dashboard() {
             </div>
           )}
           <ul className="flex flex-col gap-4">
-            {dailyQuests.map((quest, idx) =>
-              renderProtocolBlock(
-                idx === 0 ? applyReadinessAdjustments(quest, dailyReadiness) : quest,
-                { kind: "daily", idx }
-              )
-            )}
+            {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
           </ul>
           {dailyQuests.length > 0 && completed[0] && !trainingSessionOpen && (
             <div className="mt-6">

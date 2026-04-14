@@ -11,7 +11,7 @@ export const GUMROAD_ASCEND_CHECKOUT_URL = "https://skillstacked.gumroad.com/l/a
 /** Free tier stops at this path level (XP cannot exceed max for this level). */
 export const FREE_MAX_PATH_LEVEL = 5;
 
-export const UPGRADE_LIMIT_MESSAGE = "You've reached the limit of your system";
+export const UPGRADE_LIMIT_MESSAGE = "You've reached the limit of your current system";
 
 export const EARLY_ACCESS_PRICE_LABEL = "£5";
 

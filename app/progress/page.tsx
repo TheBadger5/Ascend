@@ -12,14 +12,8 @@ import {
 } from "@/lib/ascend-path-config";
 import { getProgressionSummary } from "@/lib/progression-gate";
 import { getMaxXpForFreeTier, getSessionsRequiredForLevelUp } from "@/lib/monetization";
-import {
-  deltaSinceBaseline,
-  hasCompletedBaseline,
-  improvementLines,
-  maybeRefreshWeekSnapshot,
-} from "@/lib/baseline-metrics";
-import { saveBaselineOverlay } from "@/lib/baseline-local-overlay";
-import { getCurrentUser, getOrCreateProfile, type ProfileRow } from "@/lib/ascend-data";
+import { getCurrentUser, getOrCreateProfile } from "@/lib/ascend-data";
+import { fetchLatestExerciseHistory, type ExerciseHistoryRow } from "@/lib/exercise-progression";
 import { useProEntitlement } from "@/lib/use-pro-entitlement";
 import FreeVsProComparison from "@/components/free-vs-pro-comparison";
 import ProLockedCard from "@/components/pro-locked-card";
@@ -45,20 +39,42 @@ function sessionSummaryLine(e: PerformanceSessionEntry): string {
 
 const PATH_XP_STORAGE_KEY = "ascend.path-xp.v1";
 
+const CALIBRATION_GROUPS = {
+  lower: ["Back Squat", "Leg Press", "Front Squat"],
+  bench: ["Barbell Bench Press", "Bench Press", "Flat Dumbbell Press"],
+  pull: ["Barbell Row", "Pull-up or Lat Pulldown", "Lat Pulldown", "Chest-Supported Row", "Seated Cable Row"],
+} as const;
+
+function pickCalibrationLift(
+  history: Record<string, ExerciseHistoryRow>,
+  names: readonly string[]
+): ExerciseHistoryRow | null {
+  for (const name of names) {
+    const key = name.trim().toLowerCase();
+    if (history[key]) return history[key];
+  }
+  return null;
+}
+
+function formatCalibration(row: ExerciseHistoryRow | null): string {
+  if (!row) return "Not logged yet";
+  const reps = row.last_reps.join(", ");
+  return `${row.exercise_name}: ${row.last_weight}kg x ${reps}`;
+}
+
 export default function ProgressPage() {
   const { isPaidUser, isPaidReady, effectivePro } = useProEntitlement();
   const [trainingXp, setTrainingXp] = useState<TrainingXpState>(createEmptyTrainingXp());
   const [isReady, setIsReady] = useState(false);
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [perfPair, setPerfPair] = useState<{
     previous: PerformanceSessionEntry | null;
     current: PerformanceSessionEntry | null;
   }>({ previous: null, current: null });
-  const [cp, setCp] = useState("");
-  const [cs, setCs] = useState("");
-  const [cpl, setCpl] = useState("");
-  const [savingMetrics, setSavingMetrics] = useState(false);
-  const [metricsMessage, setMetricsMessage] = useState<string | null>(null);
+  const [calibration, setCalibration] = useState<{
+    lower: ExerciseHistoryRow | null;
+    bench: ExerciseHistoryRow | null;
+    pull: ExerciseHistoryRow | null;
+  }>({ lower: null, bench: null, pull: null });
 
   useEffect(() => {
     if (!isPaidReady) return;
@@ -80,54 +96,23 @@ export default function ProgressPage() {
       setPerfPair(getLastTwoSessions());
       const user = await getCurrentUser();
       if (user) {
-        const p = await getOrCreateProfile(user.id);
-        setProfile(p);
-        setCp(String(p.current_pushups_max ?? p.pushups_max ?? ""));
-        setCs(String(p.current_squats_max ?? p.squats_max ?? ""));
-        setCpl(
-          p.current_plank_time != null || p.plank_time != null
-            ? String(p.current_plank_time ?? p.plank_time ?? "")
-            : ""
-        );
+        await getOrCreateProfile(user.id);
+        const names = [
+          ...CALIBRATION_GROUPS.lower,
+          ...CALIBRATION_GROUPS.bench,
+          ...CALIBRATION_GROUPS.pull,
+        ];
+        const history = await fetchLatestExerciseHistory(user.id, names);
+        setCalibration({
+          lower: pickCalibrationLift(history, CALIBRATION_GROUPS.lower),
+          bench: pickCalibrationLift(history, CALIBRATION_GROUPS.bench),
+          pull: pickCalibrationLift(history, CALIBRATION_GROUPS.pull),
+        });
       }
       setIsReady(true);
     };
     void load();
   }, [isPaidReady, effectivePro]);
-
-  const saveCurrentMetrics = async () => {
-    if (!profile) return;
-    const pu = Number.parseInt(cp, 10);
-    const sq = Number.parseInt(cs, 10);
-    const plStr = cpl.trim();
-    const pl = plStr === "" ? null : Number.parseInt(plStr, 10);
-    if (!Number.isFinite(pu) || pu < 1 || !Number.isFinite(sq) || sq < 1) {
-      setMetricsMessage("Enter valid push-ups and squats (min 1).");
-      return;
-    }
-    if (pl != null && (!Number.isFinite(pl) || pl < 1)) {
-      setMetricsMessage("Plank: seconds or leave empty.");
-      return;
-    }
-    setSavingMetrics(true);
-    setMetricsMessage(null);
-    saveBaselineOverlay(profile.id, {
-      current_pushups_max: pu,
-      current_squats_max: sq,
-      current_plank_time: pl,
-    });
-    setSavingMetrics(false);
-    const updated: ProfileRow = {
-      ...profile,
-      current_pushups_max: pu,
-      current_squats_max: sq,
-      current_plank_time: pl,
-    };
-    setProfile(updated);
-    maybeRefreshWeekSnapshot(updated);
-    setMetricsMessage("Saved.");
-    window.setTimeout(() => setMetricsMessage(null), 2400);
-  };
 
   if (!isReady) {
     return <LoadingScreen label="Loading training progress..." />;
@@ -141,119 +126,31 @@ export default function ProgressPage() {
     sessionsRequired: getSessionsRequiredForLevelUp(effectivePro),
   });
   const strengthIdentityLine = getStrengthIdentityLine(perfPair.previous, perfPair.current);
-  const feedback = improvementLines(profile);
-  const deltas = profile && hasCompletedBaseline(profile) ? deltaSinceBaseline(profile) : null;
+  const calibrationReady = Boolean(calibration.lower && calibration.bench && calibration.pull);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl items-center justify-center px-4 py-8">
         <section className="w-full max-w-lg rounded-2xl border border-zinc-800 bg-zinc-900/95 px-6 py-8 shadow-[0_20px_60px_-35px_rgba(0,0,0,0.9)]">
           <h1 className="mb-2 text-4xl font-semibold tracking-tight text-zinc-50">Progress</h1>
-          <p className="mb-8 text-sm text-zinc-400">Strength level, baseline, and unlocks</p>
+          <p className="mb-8 text-sm text-zinc-400">Strength level, calibration, and unlocks</p>
 
-          {feedback.length > 0 && (
-            <div className="mb-6 space-y-1.5 rounded-xl border border-emerald-900/35 bg-emerald-950/15 px-4 py-3">
-              {feedback.map((line) => (
-                <p key={line} className="text-[12px] leading-relaxed text-emerald-400/90">
-                  {line}
-                </p>
-              ))}
+          <div className="mb-6 rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Initial strength calibration</p>
+            <p className="mt-2 text-[11px] text-zinc-500">
+              Established from your first logged gym sessions (weight + reps), not bodyweight tests.
+            </p>
+            <div className="mt-3 space-y-1.5 text-[12px]">
+              <p className="text-zinc-300">{formatCalibration(calibration.lower)}</p>
+              <p className="text-zinc-300">{formatCalibration(calibration.bench)}</p>
+              <p className="text-zinc-300">{formatCalibration(calibration.pull)}</p>
             </div>
-          )}
-
-          {profile && hasCompletedBaseline(profile) && (
-            <div className="mb-6 rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Baseline vs current</p>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-center text-[11px]">
-                <div>
-                  <p className="text-zinc-600">Push-ups</p>
-                  <p className="mt-1 tabular-nums text-zinc-300">{profile.pushups_max ?? "—"}</p>
-                  <p className="text-[10px] text-zinc-600">Day 1</p>
-                </div>
-                <div>
-                  <p className="text-zinc-600">Squats</p>
-                  <p className="mt-1 tabular-nums text-zinc-300">{profile.squats_max ?? "—"}</p>
-                  <p className="text-[10px] text-zinc-600">Day 1</p>
-                </div>
-                <div>
-                  <p className="text-zinc-600">Plank (s)</p>
-                  <p className="mt-1 tabular-nums text-zinc-300">{profile.plank_time ?? "—"}</p>
-                  <p className="text-[10px] text-zinc-600">Day 1</p>
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 border-t border-zinc-700/60 pt-3 text-center text-[11px]">
-                <div>
-                  <p className="tabular-nums text-zinc-100">{profile.current_pushups_max ?? profile.pushups_max ?? "—"}</p>
-                  <p className="text-[10px] text-zinc-600">Now</p>
-                </div>
-                <div>
-                  <p className="tabular-nums text-zinc-100">{profile.current_squats_max ?? profile.squats_max ?? "—"}</p>
-                  <p className="text-[10px] text-zinc-600">Now</p>
-                </div>
-                <div>
-                  <p className="tabular-nums text-zinc-100">
-                    {profile.current_plank_time ?? profile.plank_time ?? "—"}
-                  </p>
-                  <p className="text-[10px] text-zinc-600">Now</p>
-                </div>
-              </div>
-              {deltas && (deltas.pushups != null || deltas.squats != null) && (
-                <p className="mt-3 text-[11px] text-zinc-500">
-                  {deltas.pushups != null && deltas.pushups !== 0 && (
-                    <span className="mr-2">
-                      Push-ups {deltas.pushups > 0 ? "+" : ""}
-                      {deltas.pushups} vs Day 1
-                    </span>
-                  )}
-                  {deltas.squats != null && deltas.squats !== 0 && (
-                    <span>
-                      Squats {deltas.squats > 0 ? "+" : ""}
-                      {deltas.squats} vs Day 1
-                    </span>
-                  )}
-                </p>
-              )}
-
-              <div className="mt-4 border-t border-zinc-700/60 pt-4">
-                <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">Update current numbers</p>
-                <div className="mt-2 flex gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100"
-                    placeholder="Push-ups"
-                    value={cp}
-                    onChange={(e) => setCp(e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100"
-                    placeholder="Squats"
-                    value={cs}
-                    onChange={(e) => setCs(e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100"
-                    placeholder="Plank s"
-                    value={cpl}
-                    onChange={(e) => setCpl(e.target.value)}
-                  />
-                </div>
-                <button
-                  type="button"
-                  disabled={savingMetrics}
-                  onClick={() => void saveCurrentMetrics()}
-                  className="mt-2 w-full rounded-lg border border-zinc-600 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                >
-                  {savingMetrics ? "Saving…" : "Save"}
-                </button>
-                {metricsMessage && <p className="mt-2 text-[11px] text-zinc-500">{metricsMessage}</p>}
-              </div>
-            </div>
-          )}
+            <p className={`mt-3 text-[11px] ${calibrationReady ? "text-emerald-400/90" : "text-zinc-500"}`}>
+              {calibrationReady
+                ? "Calibration complete. Progression now tracks gym performance only."
+                : "Complete sessions containing squat/leg press, bench, and row/pulldown to finish calibration."}
+            </p>
+          </div>
 
           <div className="mb-6 rounded-xl border border-zinc-700/80 bg-zinc-800/70 px-4 py-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Strength level</p>
