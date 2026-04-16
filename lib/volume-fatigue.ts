@@ -44,22 +44,13 @@ function inferPrimaryMuscle(exerciseName: string): MuscleGroup {
   return "core";
 }
 
-function isoWeekNumber(d: Date): number {
-  const dt = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dayNum = dt.getUTCDay() || 7;
-  dt.setUTCDate(dt.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-  return Math.ceil((((dt.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-}
+const DEFAULT_SESSIONS_PER_WEEK = 3;
 
-export function isDeloadWeek(date: Date): boolean {
-  const week = isoWeekNumber(date);
-  return week % 4 === 0;
-}
-
-export function getProgramWeekInfo(date: Date): ProgramWeekInfo {
-  const isoWeek = isoWeekNumber(date);
-  const cycleWeek = (((isoWeek - 1) % 4) + 1) as 1 | 2 | 3 | 4;
+export function getProgramWeekInfo(completedSessions: number, sessionsPerWeek = DEFAULT_SESSIONS_PER_WEEK): ProgramWeekInfo {
+  const safeSessions = Math.max(0, Math.floor(completedSessions));
+  const safeSessionsPerWeek = Math.max(1, Math.floor(sessionsPerWeek));
+  const completedWeeks = Math.floor(safeSessions / safeSessionsPerWeek);
+  const cycleWeek = ((completedWeeks % 4) + 1) as 1 | 2 | 3 | 4;
   const intent =
     cycleWeek === 1
       ? "Build baseline"
@@ -69,6 +60,10 @@ export function getProgramWeekInfo(date: Date): ProgramWeekInfo {
           ? "Push intensity"
           : "Deload";
   return { weekNumber: cycleWeek, intent };
+}
+
+export function isDeloadWeek(programWeek: ProgramWeekInfo): boolean {
+  return programWeek.weekNumber === 4;
 }
 
 export function calculateWeeklyVolumeByMuscle(rows: ExerciseVolumeRow[]): WeeklyVolumeByMuscle {
@@ -82,11 +77,12 @@ export function calculateWeeklyVolumeByMuscle(rows: ExerciseVolumeRow[]): Weekly
 }
 
 export function getSessionAutoAdjustment(
-  date: Date,
+  _date: Date,
   session: GymSession,
-  weeklyVolume: WeeklyVolumeByMuscle
+  weeklyVolume: WeeklyVolumeByMuscle,
+  programWeek: ProgramWeekInfo
 ): SessionAutoAdjustment {
-  const deload = isDeloadWeek(date);
+  const deload = isDeloadWeek(programWeek);
   const muscles = Array.from(new Set(session.exercises.map((e) => inferPrimaryMuscle(e.name))));
   const overThreshold = muscles.some((m) => (weeklyVolume[m] ?? 0) > OVERTRAINING_THRESHOLD);
   if (deload) {

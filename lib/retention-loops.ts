@@ -8,7 +8,7 @@ import { addDaysToDateKey, formatExpiresInHoursLabel } from "./daily-protocol-ur
 
 export const WEEKLY_SESSION_GOAL = 3;
 
-export const STAY_CONSISTENT_REMINDER = "Stay consistent";
+export const STAY_CONSISTENT_REMINDER = "Execute the planned session.";
 
 /** XP needed to reach the first point value of the next path level band. */
 export function xpRemainingToNextLevel(xp: number): number {

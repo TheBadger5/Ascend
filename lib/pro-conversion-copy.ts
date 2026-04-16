@@ -3,19 +3,19 @@
  */
 
 export const HOME_HERO_HEADLINE = "Turn your training into a system that progresses";
-export const HOME_HERO_SUBHEADLINE = "Structured training. Real progression. No guesswork.";
+export const HOME_HERO_SUBHEADLINE = "This isn't just a workout. It's a system that builds your strength session by session.";
 
 export const PRO_LOCKED_HEADLINE = "You've reached the limit of your current system";
 
-export const PRO_LOCKED_BODY_LEAD = "Most people stay here and stop progressing.";
+export const PRO_LOCKED_BODY_LEAD = "Free mode holds your current structure.";
 
 export const PRO_LOCKED_BODY_PREFIX = "The full system gives you:";
 
 export const PRO_LOCKED_BULLETS = [
   "Structured weekly training",
-  "Real strength progression",
+  "Session-to-session load progression",
   "Smarter sessions that adapt to you",
-  "Faster results",
+  "Clear next targets every session",
 ] as const;
 
 /** Primary CTA — price comes from `EARLY_ACCESS_PRICE_LABEL` in monetization. */

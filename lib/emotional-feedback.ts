@@ -5,14 +5,14 @@
 
 /** Primary lines after completing the daily protocol (modal). */
 export const PROTOCOL_COMPLETION_HEADLINE = "You trained today.";
-export const PROTOCOL_COMPLETION_CONTEXT = "Most people didn't.";
-export const PROTOCOL_COMPLETION_SUBLINE = "This is how strength is built.";
+export const PROTOCOL_COMPLETION_CONTEXT = "Session logged. Data updated.";
+export const PROTOCOL_COMPLETION_SUBLINE = "Next session will build from this result.";
 
 /** Logged performance improved vs previous session (trackers filled). */
 export const STRONGER_THAN_LAST_SESSION_LINE = "You're stronger than last session";
 
 /** Shown under streak count in the completion modal when streak ≥ 2. */
-export const STREAK_CHAIN_REMINDER = "Don't break the chain.";
+export const STREAK_CHAIN_REMINDER = "Protect session cadence.";
 
 /**
  * Dashboard / pressure strip — count only (chain reminder is in the session-complete modal).

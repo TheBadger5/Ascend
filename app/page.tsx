@@ -64,6 +64,7 @@ import {
   calculateWeeklyVolumeByMuscle,
   getProgramWeekInfo,
   getSessionAutoAdjustment,
+  type ProgramWeekInfo,
   type WeeklyVolumeByMuscle,
 } from "@/lib/volume-fatigue";
 import {
@@ -100,7 +101,6 @@ import { logProfileTableDebug } from "@/lib/profile-supabase-debug";
 import { supabase } from "@/lib/supabase";
 import { logUserEvent, USER_EVENT_TYPES } from "@/lib/user-events";
 import ProLockedCard from "@/components/pro-locked-card";
-import LoadingScreen from "./loading-screen";
 import { effectiveLevelForPathUnlocks } from "@/lib/pro-gating";
 import {
   getStrengthRank,
@@ -143,12 +143,15 @@ import {
   trainingLevelLabel,
   type TrainingLevel,
 } from "@/lib/training-level";
+import { getExerciseVisual } from "@/lib/exercise-visuals";
+import Image from "next/image";
 const ONBOARDING_STORAGE_KEY = "ascend.onboarding.completed.v1";
+const FIRST_IMPROVEMENT_HOOK_SHOWN_KEY = "ascend.first-improvement-hook.v1";
 const ONBOARDING_STEPS = [
-  "A system to build strength, discipline, and a powerful body.",
-  "Ascend is strength training: one training protocol each day, executed with intent.",
+  "Ascend runs your strength system with one clear daily protocol.",
+  "Each session follows structure, progression, and logged execution.",
   "Every session earns XP. Three daily completions unlock the next level — no shortcuts.",
-  "You are not chasing motivation. You are building a body that shows up.",
+  "You execute. The system handles progression decisions.",
 ] as const;
 const STRENGTH_PATH_ID = STRENGTH_UNLOCK_PATH_ID;
 const formatStrengthXpGain = (xp: number) => `+${xp} Strength XP`;
@@ -379,6 +382,13 @@ const getLocalDateKey = () => {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 };
 
+const toLocalDateKeyFromIso = (value: string | null | undefined): string | null => {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
 const dayDiff = (a: string, b: string) =>
   Math.floor((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000);
 
@@ -400,7 +410,8 @@ const createDailyQuests = (
   isPaidUser = false,
   weeklyVolume: WeeklyVolumeByMuscle = EMPTY_WEEKLY_VOLUME,
   sessionOverride: GymSession | null = null,
-  trainingLevel: TrainingLevel = "intermediate"
+  trainingLevel: TrainingLevel = "intermediate",
+  programWeek: ProgramWeekInfo = { weekNumber: 1, intent: "Build baseline" }
 ): DailyQuest[] => {
   void previous;
   const pathLevel = getPathLevelFromXp(trainingXp.strength?.xp ?? 0);
@@ -422,7 +433,7 @@ const createDailyQuests = (
       reps: repRangeForTrainingLevel(trainingLevel, e.reps),
     })),
   };
-  const auto = getSessionAutoAdjustment(localDate, session, weeklyVolume);
+  const auto = getSessionAutoAdjustment(localDate, session, weeklyVolume, programWeek);
   const fatigueSensitivityScale = trainingLevel === "beginner" ? 0.9 : trainingLevel === "advanced" ? 1.08 : 1;
   const adjustedAutoVolumeScale = Math.max(0.45, Math.min(1.25, auto.volumeScale * fatigueSensitivityScale));
   const paidAccelerationScale = isPaidUser && auto.volumeScale >= 0.99 ? 1.1 : 1;
@@ -517,6 +528,7 @@ export default function Dashboard() {
     totalVolume: 0,
     strongestLift: null,
   });
+  const [programWeek, setProgramWeek] = useState<ProgramWeekInfo>({ weekNumber: 1, intent: "Build baseline" });
   const [undoCompletion, setUndoCompletion] = useState<UndoCompletionRecord | null>(null);
   const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const [yesterdayDailyMissed, setYesterdayDailyMissed] = useState(false);
@@ -530,6 +542,14 @@ export default function Dashboard() {
   const { isPaidUser, isPaidReady, effectivePro, refresh: refreshPaidAccess } = useProEntitlement();
   const [proConversionModalOpen, setProConversionModalOpen] = useState(false);
   const [firstSystemMomentOpen, setFirstSystemMomentOpen] = useState(false);
+  const [bootTimedOut, setBootTimedOut] = useState(false);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootStage, setBootStage] = useState("idle");
+  const [expandedExerciseVisual, setExpandedExerciseVisual] = useState<{
+    src: string;
+    exerciseName: string;
+    source: string;
+  } | null>(null);
 
   useEffect(() => {
     if (effectivePro && proConversionModalOpen) {
@@ -540,10 +560,20 @@ export default function Dashboard() {
   useEffect(() => {
     const load = async () => {
       let trainingXpForDaily: TrainingXpState = createEmptyTrainingXp();
+      let currentStage = "starting";
+      const markStage = (stage: string) => {
+        currentStage = stage;
+        setBootStage(stage);
+        console.log(`[HOME LOAD DEBUG] stage=${stage}`);
+      };
       try {
+        setBootError(null);
+        setBootTimedOut(false);
+        markStage("starting");
         setXpResolved(false);
         setUndoCompletion(null);
         setOptionalConditioningDone(false);
+        markStage("read-local");
         const storedLevelRaw = window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY);
         const localStoredLevel = parseTrainingLevel(storedLevelRaw);
         console.log("[TRAINING LEVEL DEBUG] Supabase level: pending");
@@ -561,10 +591,13 @@ export default function Dashboard() {
         normalizedXp = ensureStrengthLine(normalizedXp);
         console.log("[XP DEBUG] homepage raw ascend.path-xp.v1:", rawPathXp);
 
+        markStage("refresh-paid-access");
         const resolvedPaid = await refreshPaidAccess();
+        markStage("resolve-auth");
         const user = await getCurrentUser();
         let profile: ProfileRow | null = null;
         if (user) {
+          markStage("load-supabase-xp-profile");
           const supabaseBacked = await loadSupabaseBackedStrengthXp(user.id, normalizedXp);
           normalizedXp = supabaseBacked.state;
           profile = supabaseBacked.profile;
@@ -630,12 +663,47 @@ export default function Dashboard() {
         setXpResolved(true);
 
         if (!user) {
+          markStage("guest-ready");
+          setProgramWeek({ weekNumber: 1, intent: "Build baseline" });
           setSystemIntegrityScore(loadSystemIntegrityState(getLocalDateKey()).score);
           return;
         }
         if (!profile) return;
         setUserId(user.id);
+        markStage("load-daily-and-weekly");
         const today = getLocalDateKey();
+        const baselineStartDateKey = toLocalDateKeyFromIso(profile.baseline_completed_at ?? null);
+        const { data: firstSessionRow } = await supabase
+          .from("training_sessions")
+          .select("completed_at")
+          .eq("user_id", user.id)
+          .order("completed_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        const firstSessionDateKey = toLocalDateKeyFromIso(firstSessionRow?.completed_at ?? null);
+        const progressionStartDateKey = baselineStartDateKey ?? firstSessionDateKey ?? today;
+        const { data: progressionRows } = await supabase
+          .from("daily_tasks")
+          .select("tasks, completed, date")
+          .eq("user_id", user.id)
+          .gte("date", progressionStartDateKey)
+          .lte("date", today);
+        const completedProgressionSessions = (progressionRows ?? []).reduce((count, row) => {
+          const hydrated = hydrateDailyQuests(row.tasks);
+          const rawCompleted = (row.completed as boolean[]) ?? [];
+          const { completed: singleCompleted } = normalizeSingleStrengthTask(hydrated, rawCompleted);
+          return count + (singleCompleted[0] ? 1 : 0);
+        }, 0);
+        const programWeekInfo = getProgramWeekInfo(completedProgressionSessions);
+        setProgramWeek(programWeekInfo);
+        console.log("[PROGRAM WEEK DEBUG]", {
+          progressionStartDateKey,
+          baselineStartDateKey,
+          firstSessionDateKey,
+          completedProgressionSessions,
+          programWeek: programWeekInfo.weekNumber,
+          intent: programWeekInfo.intent,
+        });
         const weekMonForVolume = mondayDateKeyForLocalWeekContaining(today);
         const weekSunForVolume = sundayDateKeyFromMonday(weekMonForVolume);
         const weekVolumeRows = await fetchExerciseVolumeRowsForRange(user.id, weekMonForVolume, weekSunForVolume);
@@ -690,7 +758,8 @@ export default function Dashboard() {
               false,
               weeklyVolume,
               null,
-              resolvedTrainingLevel
+              resolvedTrainingLevel,
+              programWeekInfo
             );
             singleTasks = regenerated;
             singleCompleted = Array.from({ length: regenerated.length }, () => false);
@@ -719,7 +788,8 @@ export default function Dashboard() {
             resolvedPaid,
             weeklyVolume,
             null,
-            resolvedTrainingLevel
+            resolvedTrainingLevel,
+            programWeekInfo
           );
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
@@ -826,12 +896,38 @@ export default function Dashboard() {
           totalVolume: weekVolume,
           strongestLift: strongest ? `${strongest.exercise} (${strongest.weight}kg)` : null,
         });
+        markStage("complete");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown homepage load error";
+        console.error("[HOME LOAD DEBUG] stage=failed", { stage: currentStage, error });
+        setBootError(message);
+        // Keep core UI renderable even if Supabase/auth fails.
+        setXpResolved(true);
       } finally {
         setIsReady(true);
       }
     };
     load();
   }, [loadVersion, refreshPaidAccess]);
+
+  useEffect(() => {
+    if (isReady && xpResolved && isPaidReady) {
+      setBootTimedOut(false);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      if (!isReady || !xpResolved || !isPaidReady) {
+        console.warn("[HOME LOAD DEBUG] timeout waiting for boot", {
+          isReady,
+          xpResolved,
+          isPaidReady,
+          stage: bootStage,
+        });
+        setBootTimedOut(true);
+      }
+    }, 4500);
+    return () => window.clearTimeout(id);
+  }, [isReady, xpResolved, isPaidReady, bootStage, loadVersion]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -1116,6 +1212,7 @@ export default function Dashboard() {
     let strongerThanLast = false;
     let strengthImproved = false;
     let liftedMore = false;
+    let showFirstImprovementHook = false;
     let newPersonalBest = false;
     let weeklyImproving = false;
     let volumeChangePercent: number | null = null;
@@ -1279,6 +1376,22 @@ export default function Dashboard() {
         firstSystemMomentPendingRef.current = true;
       }
       setWeeklySessionsCount((w) => w + 1);
+      if ((strengthImproved || liftedMore) && typeof window !== "undefined") {
+        const alreadyShown = window.localStorage.getItem(FIRST_IMPROVEMENT_HOOK_SHOWN_KEY) === "1";
+        if (!alreadyShown) {
+          showFirstImprovementHook = true;
+          window.localStorage.setItem(FIRST_IMPROVEMENT_HOOK_SHOWN_KEY, "1");
+        }
+      }
+      const progressMessages = pickProgressMessages({
+        strengthImproved,
+        liftedMore,
+        newPersonalBest,
+        volumeChangePercent,
+      });
+      if (showFirstImprovementHook) {
+        progressMessages.unshift("You're already stronger than your last session");
+      }
       setProtocolCompletionFeedback({
         streak: streakAfterComplete,
         streakLine: formatStreakIdentityLine(streakAfterComplete),
@@ -1288,12 +1401,7 @@ export default function Dashboard() {
         newPersonalBest,
         weeklyImproving,
         volumeChangePercent,
-        progressMessages: pickProgressMessages({
-          strengthImproved,
-          liftedMore,
-          newPersonalBest,
-          volumeChangePercent,
-        }),
+        progressMessages: progressMessages.slice(0, 3),
         weeklyVolume: Math.round(weeklyVolumeTotal),
         strongestLift: strongestLiftLabel,
       });
@@ -1328,7 +1436,8 @@ export default function Dashboard() {
       effectivePro,
       weeklyVolume,
       currentSession,
-      nextLevel
+      nextLevel,
+      programWeek
     );
     setDailyQuests(regenerated);
     setExpandedQuestIds({});
@@ -1661,6 +1770,7 @@ export default function Dashboard() {
                     const intentLabel = getExerciseIntentLabel(spec.name, idx);
                     const normalized = normalizeExerciseName(spec.name);
                     const last = exerciseHistoryByName[normalized] ?? null;
+                    const visual = getExerciseVisual(spec.name);
                     const weightKey = getExerciseInputKey(effectiveQuest.id, spec.name, "weight");
                     const repsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "reps");
                     const setsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "sets");
@@ -1670,7 +1780,23 @@ export default function Dashboard() {
                     return (
                       <div key={`${effectiveQuest.id}-${normalized}`} className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
+                          <div className="flex items-center gap-2.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedExerciseVisual({
+                                  src: visual.src,
+                                  exerciseName: spec.name,
+                                  source: visual.source,
+                                })
+                              }
+                              className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 transition-colors hover:border-zinc-500"
+                              aria-label={`View ${spec.name} exercise visual`}
+                            >
+                              <Image src={visual.src} alt={visual.label} width={36} height={36} className="h-9 w-9 object-cover" />
+                            </button>
+                            <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
+                          </div>
                           <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-400">
                             {intentLabel}
                           </span>
@@ -1678,6 +1804,7 @@ export default function Dashboard() {
                         <p className="mt-1 text-[11px] text-zinc-500">
                           {last ? `Last time: ${formatLastPerformance(last)}` : "Last time: no history yet"}
                         </p>
+                        <p className="mt-1 text-xs font-semibold text-zinc-200">Your job: beat this</p>
                         <p className="mt-1 text-[11px] text-emerald-400/90">
                           {getDoubleProgressionTarget(
                             spec,
@@ -1864,7 +1991,55 @@ export default function Dashboard() {
     );
   };
 
-  if (!isReady || !xpResolved) return <LoadingScreen label="Loading…" />;
+  const bootBlocking = !isReady || !xpResolved || !isPaidReady;
+  const showBootFallback = bootBlocking && (bootTimedOut || bootError);
+
+  if (bootBlocking) {
+    if (!showBootFallback) {
+      return (
+        <div className="min-h-screen bg-zinc-950 text-zinc-100">
+          <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-10">
+            <section className="w-full max-w-md space-y-4">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+                <p className="text-sm font-medium text-zinc-200">Loading your system...</p>
+                <p className="mt-1 text-xs text-zinc-500">Stage: {bootStage}</p>
+              </div>
+              <div className="h-28 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/40" />
+              <div className="h-44 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/40" />
+            </section>
+          </main>
+        </div>
+      );
+    }
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100">
+        <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-10">
+          <section className="w-full max-w-md space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-4">
+            <p className="text-sm font-semibold text-zinc-100">Basic mode loaded</p>
+            <p className="text-xs text-zinc-400">
+              We could not finish syncing your data yet. You can retry now while keeping the page responsive.
+            </p>
+            <p className="text-[11px] text-zinc-500">Stage: {bootStage}</p>
+            {bootError && <p className="text-[11px] text-amber-400/90">Error: {bootError}</p>}
+            <button
+              type="button"
+              className="w-full rounded-full border border-zinc-600 bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900"
+              onClick={() => {
+                console.log("[HOME LOAD DEBUG] retry tapped");
+                setBootTimedOut(false);
+                setBootError(null);
+                setIsReady(false);
+                setXpResolved(false);
+                setLoadVersion((v) => v + 1);
+              }}
+            >
+              Retry
+            </button>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   if (showOnboarding) {
     const isFinalStep = onboardingStep === ONBOARDING_STEPS.length - 1;
@@ -1924,10 +2099,6 @@ export default function Dashboard() {
     );
   }
 
-  if (!isPaidReady) {
-    return <LoadingScreen label="Loading…" />;
-  }
-
   const strengthRank = getStrengthRank(level);
   const pressureStreakLine = streakPressureLine(currentStreak);
   const pathXp = trainingXpState.strength?.xp ?? 0;
@@ -1944,8 +2115,6 @@ export default function Dashboard() {
     .filter((u) => u.levelRequirement > effUnlockLevel)
     .sort((a, b) => a.levelRequirement - b.levelRequirement)
     .slice(1, 3);
-  const todayForProgramWeek = new Date();
-  const programWeek = getProgramWeekInfo(todayForProgramWeek);
   const effectiveDailyReadiness = readinessForTrainingLevel(dailyReadiness, trainingLevel);
 
   return (
@@ -1956,6 +2125,7 @@ export default function Dashboard() {
             <p className="text-xl font-semibold leading-snug tracking-tight text-zinc-50">{PROTOCOL_COMPLETION_HEADLINE}</p>
             <p className="mt-3 text-sm leading-relaxed text-zinc-400">{PROTOCOL_COMPLETION_CONTEXT}</p>
             <p className="mt-4 text-sm leading-relaxed text-zinc-300">{PROTOCOL_COMPLETION_SUBLINE}</p>
+            <p className="mt-2 text-sm font-medium leading-relaxed text-zinc-200">Your system is progressing.</p>
             {protocolCompletionFeedback.streakLine && (
               <div className="mt-6 border-t border-zinc-800/80 pt-5">
                 <p className="text-sm leading-relaxed text-zinc-300">{protocolCompletionFeedback.streakLine}</p>
@@ -1985,7 +2155,7 @@ export default function Dashboard() {
             </div>
             {!effectivePro && (
               <div className="mt-4">
-                <p className="text-xs text-zinc-500">You're making progress. Unlock the full system to keep it going.</p>
+                <p className="text-xs text-zinc-500">Your data is compounding. Unlock the full system to accelerate progression.</p>
                 <button
                   type="button"
                   className="mt-2 text-xs font-medium text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline"
@@ -2065,6 +2235,32 @@ export default function Dashboard() {
             >
               Continue
             </button>
+          </div>
+        </div>
+      )}
+      {expandedExerciseVisual && (
+        <div className="fixed inset-0 z-[74] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-950 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-sm font-medium text-zinc-100">{expandedExerciseVisual.exerciseName}</p>
+              <button
+                type="button"
+                className="rounded-full border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                onClick={() => setExpandedExerciseVisual(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/80">
+              <Image
+                src={expandedExerciseVisual.src}
+                alt={`${expandedExerciseVisual.exerciseName} movement visual`}
+                width={280}
+                height={280}
+                className="h-auto w-full"
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-500">Visual source: {expandedExerciseVisual.source}</p>
           </div>
         </div>
       )}
@@ -2268,16 +2464,13 @@ export default function Dashboard() {
           </p>
           <div className="mb-3 space-y-1">
             <p className="text-[11px] text-zinc-400">You're on Week {programWeek.weekNumber} of your system.</p>
-            <p className="text-[10px] text-zinc-500">
-              {weeklySessionsCount >= 2 ? "Your training is progressing." : "Stay consistent. Your training is progressing."}
-            </p>
+            <p className="text-[10px] text-zinc-500">Your training is progressing through structure, not guesswork.</p>
             <p className="text-[10px] text-zinc-600">Your system is evolving.</p>
           </div>
-          <p className="mb-1 text-[11px] leading-relaxed text-zinc-500">
-            This session works by progressive overload: add a little more load, reps, or quality over time.
-          </p>
           <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">
-            Exercises are chosen to cover your main patterns first, then accessories to build weak points.
+            {weeklySessionsCount > 0
+              ? "This session is designed to improve your strength based on your previous performance."
+              : "This session is designed to improve your strength by setting your first performance baseline."}
           </p>
           <div className="mb-4 space-y-2">
             {pressureStreakLine && (

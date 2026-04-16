@@ -21,6 +21,7 @@ export default function TopNav() {
   const isProgress = pathname === "/progress";
   const isReview = pathname === "/review";
   const isStats = pathname === "/stats";
+  const isHistory = pathname === "/history";
   const isUpgrade = pathname === "/upgrade";
 
   useEffect(() => {
@@ -103,6 +104,16 @@ export default function TopNav() {
             }`}
           >
             Stats
+          </Link>
+          <Link
+            href="/history"
+            className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
+              isHistory
+                ? "bg-zinc-200 text-zinc-900"
+                : "text-zinc-300 hover:text-zinc-100"
+            }`}
+          >
+            History
           </Link>
           {isReviewUnlocked && (
             <Link

@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Ascend",
-  description: "Daily discipline tracker",
+  description: "Structured strength system with session-by-session progression",
   icons: {
     icon: "/ascend-logo.png",
     apple: "/ascend-logo.png",
