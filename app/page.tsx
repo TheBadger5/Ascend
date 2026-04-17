@@ -144,6 +144,12 @@ import {
   type TrainingLevel,
 } from "@/lib/training-level";
 import { getExerciseVisual } from "@/lib/exercise-visuals";
+import {
+  enqueueOfflineSessionSync,
+  enqueueOfflineXpSync,
+  flushOfflineQueue,
+  getOfflineQueueSize,
+} from "@/lib/offline-sync-queue";
 import Image from "next/image";
 const ONBOARDING_STORAGE_KEY = "ascend.onboarding.completed.v1";
 const FIRST_IMPROVEMENT_HOOK_SHOWN_KEY = "ascend.first-improvement-hook.v1";
@@ -545,6 +551,8 @@ export default function Dashboard() {
   const [bootTimedOut, setBootTimedOut] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStage, setBootStage] = useState("idle");
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const [offlineMode, setOfflineMode] = useState(false);
   const [expandedExerciseVisual, setExpandedExerciseVisual] = useState<{
     src: string;
     exerciseName: string;
@@ -901,6 +909,26 @@ export default function Dashboard() {
         const message = error instanceof Error ? error.message : "Unknown homepage load error";
         console.error("[HOME LOAD DEBUG] stage=failed", { stage: currentStage, error });
         setBootError(message);
+        setOfflineMode(true);
+        const fallbackLevel =
+          typeof window !== "undefined"
+            ? (parseTrainingLevel(window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY)) ?? "intermediate")
+            : "intermediate";
+        const fallbackDate = getLocalDateKey();
+        const fallbackTasks = createDailyQuests(
+          [],
+          trainingXpForDaily,
+          fallbackDate,
+          false,
+          EMPTY_WEEKLY_VOLUME,
+          null,
+          fallbackLevel,
+          { weekNumber: 1, intent: "Build baseline" }
+        );
+        setProgramWeek({ weekNumber: 1, intent: "Build baseline" });
+        setDailyTaskId(null);
+        setDailyQuests(fallbackTasks);
+        setCompleted(Array.from({ length: fallbackTasks.length }, () => false));
         // Keep core UI renderable even if Supabase/auth fails.
         setXpResolved(true);
       } finally {
@@ -928,6 +956,37 @@ export default function Dashboard() {
     }, 4500);
     return () => window.clearTimeout(id);
   }, [isReady, xpResolved, isPaidReady, bootStage, loadVersion]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const refreshOfflineState = () => {
+      const queueSize = getOfflineQueueSize();
+      setOfflineQueueCount(queueSize);
+      setOfflineMode(!window.navigator.onLine || Boolean(bootError) || queueSize > 0);
+    };
+    refreshOfflineState();
+    window.addEventListener("online", refreshOfflineState);
+    window.addEventListener("offline", refreshOfflineState);
+    return () => {
+      window.removeEventListener("online", refreshOfflineState);
+      window.removeEventListener("offline", refreshOfflineState);
+    };
+  }, [bootError, loadVersion]);
+
+  useEffect(() => {
+    if (!userId || typeof window === "undefined" || !window.navigator.onLine) return;
+    if (offlineQueueCount <= 0) return;
+    const sync = async () => {
+      console.log("[OFFLINE SYNC] flushing queue", { queued: offlineQueueCount });
+      const result = await flushOfflineQueue(userId);
+      console.log("[OFFLINE SYNC] flush result", result);
+      setOfflineQueueCount(result.remaining);
+      if (result.remaining === 0 && window.navigator.onLine && !bootError) {
+        setOfflineMode(false);
+      }
+    };
+    void sync();
+  }, [userId, offlineQueueCount, bootError]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -1186,7 +1245,7 @@ export default function Dashboard() {
     rows.reduce((sum, row) => sum + getExerciseLogVolume(row.last_weight, row.last_reps), 0);
 
   const handleComplete = async (idx: number) => {
-    if (!userId || dailyTaskId === null || completed[idx]) return;
+    if (completed[idx]) return;
     const quest = dailyQuests[idx];
     if (!quest || !hasAllRequiredPrePrompts(quest) || !hasAllTrackerInputsForQuest(quest)) return;
     const xpBeforeComplete = trainingXpStateRef.current.strength?.xp ?? 0;
@@ -1218,18 +1277,39 @@ export default function Dashboard() {
     let volumeChangePercent: number | null = null;
     let weeklyVolumeTotal = 0;
     let strongestLiftLabel: string | null = null;
+    const completedAtIso = new Date().toISOString();
+    const sessionDate = getLocalDateKey();
     if (idx === 0) {
       const exerciseLogs = buildExerciseLogEntriesForQuest(quest);
-      await logTrainingSessionToSupabase({
-        userId,
-        sessionType: "daily_protocol",
-        xpEarned: 10,
-        totalVolume: totalVolumeFromRows(exerciseLogs),
-        fatigueState: dailyReadiness,
-        exerciseLogs,
-      });
+      const shouldQueueSession = offlineMode || !userId || (typeof window !== "undefined" && !window.navigator.onLine);
+      if (shouldQueueSession) {
+        enqueueOfflineSessionSync({
+          sessionType: "daily_protocol",
+          xpEarned: 10,
+          totalVolume: totalVolumeFromRows(exerciseLogs),
+          fatigueState: dailyReadiness,
+          exerciseLogs,
+          completedAtIso,
+          sessionDate,
+        });
+        setOfflineQueueCount(getOfflineQueueSize());
+        setOfflineMode(true);
+      } else if (userId) {
+        await logTrainingSessionToSupabase({
+          userId,
+          sessionType: "daily_protocol",
+          xpEarned: 10,
+          totalVolume: totalVolumeFromRows(exerciseLogs),
+          fatigueState: dailyReadiness,
+          exerciseLogs,
+        });
+      }
       if (exerciseLogs.length > 0) {
-        await saveExerciseSessionLogs(exerciseLogs);
+        if (shouldQueueSession) {
+          // Already queued via enqueueOfflineSessionSync.
+        } else {
+          await saveExerciseSessionLogs(exerciseLogs);
+        }
         setExerciseHistoryByName((prev) => {
           const next = { ...prev };
           for (const row of exerciseLogs) {
@@ -1319,12 +1399,26 @@ export default function Dashboard() {
       const bumped = recordProtocolComplete(si);
       saveSystemIntegrityState(bumped);
       setSystemIntegrityScore(bumped.score);
-      await persistStrengthXpToSupabase(userId, nextXpState, { systemIntegrity: bumped.score });
+      if (userId && !offlineMode && (typeof window === "undefined" || window.navigator.onLine)) {
+        await persistStrengthXpToSupabase(userId, nextXpState, { systemIntegrity: bumped.score });
+      } else {
+        enqueueOfflineXpSync({ state: nextXpState, systemIntegrity: bumped.score });
+        setOfflineQueueCount(getOfflineQueueSize());
+        setOfflineMode(true);
+      }
     } else {
-      await persistStrengthXpToSupabase(userId, nextXpState);
+      if (userId && !offlineMode && (typeof window === "undefined" || window.navigator.onLine)) {
+        await persistStrengthXpToSupabase(userId, nextXpState);
+      } else {
+        enqueueOfflineXpSync({ state: nextXpState });
+        setOfflineQueueCount(getOfflineQueueSize());
+        setOfflineMode(true);
+      }
     }
 
-    await supabase.from("daily_tasks").update({ completed: nextCompleted }).eq("id", dailyTaskId);
+    if (userId && dailyTaskId !== null && !offlineMode && (typeof window === "undefined" || window.navigator.onLine)) {
+      await supabase.from("daily_tasks").update({ completed: nextCompleted }).eq("id", dailyTaskId);
+    }
 
     if (idx === 0 && userId) {
       logUserEvent(userId, USER_EVENT_TYPES.PROTOCOL_COMPLETED, {
@@ -1346,17 +1440,19 @@ export default function Dashboard() {
         query: 'from("profiles").update({ current_streak, best_streak }).eq("id", userId)',
         updateKeys: ["current_streak", "best_streak"],
       });
-      await supabase
-        .from("profiles")
-        .update({ current_streak: nextStreak, best_streak: nextBest })
-        .eq("id", userId);
-      await supabase.from("history").upsert({
-        user_id: userId,
-        date: getLocalDateKey(),
-        xp_earned: nextCompleted.filter(Boolean).length * 10,
-        completed_all: true,
-        streak: nextStreak,
-      });
+      if (userId && !offlineMode && (typeof window === "undefined" || window.navigator.onLine)) {
+        await supabase
+          .from("profiles")
+          .update({ current_streak: nextStreak, best_streak: nextBest })
+          .eq("id", userId);
+        await supabase.from("history").upsert({
+          user_id: userId,
+          date: getLocalDateKey(),
+          xp_earned: nextCompleted.filter(Boolean).length * 10,
+          completed_all: true,
+          streak: nextStreak,
+        });
+      }
       if (!effectivePro && getPathLevelFromXp(trainingXpStateRef.current.strength?.xp ?? 0) >= FREE_MAX_PATH_LEVEL) {
         window.setTimeout(() => setProConversionModalOpen(true), 0);
       }
@@ -1781,20 +1877,28 @@ export default function Dashboard() {
                       <div key={`${effectiveQuest.id}-${normalized}`} className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2.5">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedExerciseVisual({
-                                  src: visual.src,
-                                  exerciseName: spec.name,
-                                  source: visual.source,
-                                })
-                              }
-                              className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 transition-colors hover:border-zinc-500"
-                              aria-label={`View ${spec.name} exercise visual`}
-                            >
-                              <Image src={visual.src} alt={visual.label} width={36} height={36} className="h-9 w-9 object-cover" />
-                            </button>
+                            {visual && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedExerciseVisual({
+                                    src: visual.src,
+                                    exerciseName: spec.name,
+                                    source: visual.source,
+                                  })
+                                }
+                                className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 transition-colors hover:border-zinc-500"
+                                aria-label={`View ${spec.name} exercise visual`}
+                              >
+                                <Image
+                                  src={visual.src}
+                                  alt={visual.label}
+                                  width={36}
+                                  height={36}
+                                  className="h-9 w-9 object-cover"
+                                />
+                              </button>
+                            )}
                             <p className="text-sm font-medium text-zinc-100">{spec.name}</p>
                           </div>
                           <span className="rounded-full border border-zinc-700 bg-zinc-900/80 px-2 py-0.5 text-[10px] text-zinc-400">
@@ -1991,7 +2095,7 @@ export default function Dashboard() {
     );
   };
 
-  const bootBlocking = !isReady || !xpResolved || !isPaidReady;
+  const bootBlocking = !isReady || !xpResolved;
   const showBootFallback = bootBlocking && (bootTimedOut || bootError);
 
   if (bootBlocking) {
@@ -2015,26 +2119,55 @@ export default function Dashboard() {
       <div className="min-h-screen bg-zinc-950 text-zinc-100">
         <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-10">
           <section className="w-full max-w-md space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-4">
-            <p className="text-sm font-semibold text-zinc-100">Basic mode loaded</p>
+            <p className="text-sm font-semibold text-zinc-100">Offline mode available</p>
             <p className="text-xs text-zinc-400">
-              We could not finish syncing your data yet. You can retry now while keeping the page responsive.
+              Sync is delayed. You can continue training now and we will sync your progress shortly.
             </p>
             <p className="text-[11px] text-zinc-500">Stage: {bootStage}</p>
-            {bootError && <p className="text-[11px] text-amber-400/90">Error: {bootError}</p>}
-            <button
-              type="button"
-              className="w-full rounded-full border border-zinc-600 bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900"
-              onClick={() => {
-                console.log("[HOME LOAD DEBUG] retry tapped");
-                setBootTimedOut(false);
-                setBootError(null);
-                setIsReady(false);
-                setXpResolved(false);
-                setLoadVersion((v) => v + 1);
-              }}
-            >
-              Retry
-            </button>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                className="rounded-full border border-zinc-600 bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900"
+                onClick={() => {
+                  console.log("[HOME LOAD DEBUG] retry tapped");
+                  setBootTimedOut(false);
+                  setBootError(null);
+                  setIsReady(false);
+                  setXpResolved(false);
+                  setLoadVersion((v) => v + 1);
+                }}
+              >
+                Retry sync
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-200"
+                onClick={() => {
+                  setOfflineMode(true);
+                  setBootTimedOut(false);
+                  setXpResolved(true);
+                  setIsReady(true);
+                  if (dailyQuests.length === 0) {
+                    const level = trainingLevel ?? "intermediate";
+                    const localTasks = createDailyQuests(
+                      [],
+                      trainingXpStateRef.current,
+                      getLocalDateKey(),
+                      false,
+                      EMPTY_WEEKLY_VOLUME,
+                      null,
+                      level,
+                      { weekNumber: 1, intent: "Build baseline" }
+                    );
+                    setDailyTaskId(null);
+                    setDailyQuests(localTasks);
+                    setCompleted(Array.from({ length: localTasks.length }, () => false));
+                  }
+                }}
+              >
+                Continue offline
+              </button>
+            </div>
           </section>
         </main>
       </div>
@@ -2119,6 +2252,12 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      {offlineMode && (
+        <div className="sticky top-[73px] z-[60] border-b border-amber-700/30 bg-amber-950/40 px-4 py-2 text-center text-xs text-amber-200">
+          Offline mode - your progress will sync shortly
+          {offlineQueueCount > 0 ? ` (${offlineQueueCount} queued)` : ""}
+        </div>
+      )}
       {protocolCompletionFeedback && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-700/90 bg-zinc-900/95 px-6 py-7 text-left shadow-[0_24px_80px_-40px_rgba(255,255,255,0.2)] transition-all duration-300">
