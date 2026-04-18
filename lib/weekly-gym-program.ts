@@ -305,9 +305,64 @@ function scaleSetsLabel(label: string, scale: number): string {
 }
 
 export function applySessionVolumeScale(session: GymSession, scale: number): GymSession {
-  if (scale >= 0.99) return session;
+  if (Math.abs(scale - 1) < 0.005) return session;
   return {
     ...session,
     exercises: session.exercises.map((e) => ({ ...e, sets: scaleSetsLabel(e.sets, scale) })),
   };
+}
+
+/** Parses first numeric range in sets label: "4", "3-4", "2-3". */
+export function parseSetsNumeric(label: string): { min: number; max: number } {
+  const m = label.match(/(\d+)(?:\s*-\s*(\d+))?/);
+  if (!m) return { min: 1, max: 1 };
+  const min = Number.parseInt(m[1] ?? "1", 10);
+  const max = m[2] ? Number.parseInt(m[2], 10) : min;
+  const a = Math.max(1, min);
+  const b = Math.max(a, max);
+  return { min: a, max: b };
+}
+
+/** Sum of upper bound sets per exercise (conservative workload proxy). */
+export function sumMaxSetsAcrossSession(session: GymSession): number {
+  return session.exercises.reduce((sum, e) => sum + parseSetsNumeric(e.sets).max, 0);
+}
+
+/**
+ * Readiness-based volume: fresh ~+15%, normal baseline, tired ~−45% then cap total sets.
+ * Applied to generated gym sessions before weekly overtraining/deload scaling.
+ */
+export type SessionReadiness = "fresh" | "normal" | "tired";
+
+const READINESS_VOLUME_MULTIPLIER: Record<SessionReadiness, number> = {
+  fresh: 1.15,
+  normal: 1,
+  tired: 0.55,
+};
+
+const TIRED_MAX_SUM_SETS = 14;
+const TIRED_MIN_EXERCISES = 4;
+
+export function applyReadinessVolumeToSession(session: GymSession, readiness: SessionReadiness): GymSession {
+  if (readiness === "normal") return session;
+
+  let next = applySessionVolumeScale(session, READINESS_VOLUME_MULTIPLIER[readiness]);
+
+  if (readiness === "tired") {
+    let exercises = next.exercises.filter((e) => !e.name.trim().toLowerCase().startsWith("optional:"));
+    next = { ...next, exercises };
+
+    while (exercises.length > TIRED_MIN_EXERCISES && sumMaxSetsAcrossSession({ ...next, exercises }) > TIRED_MAX_SUM_SETS) {
+      exercises = exercises.slice(0, -1);
+    }
+    next = { ...next, exercises };
+
+    let total = sumMaxSetsAcrossSession(next);
+    if (total > TIRED_MAX_SUM_SETS) {
+      const factor = TIRED_MAX_SUM_SETS / total;
+      next = applySessionVolumeScale(next, Math.max(0.58, factor));
+    }
+  }
+
+  return next;
 }

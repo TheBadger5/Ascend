@@ -37,12 +37,14 @@ import {
   STRENGTH_BELT_LABELS,
 } from "@/lib/strength-progression";
 import {
+  applyReadinessVolumeToSession,
   applySessionVolumeScale,
   getGymSessionForDate,
   getTodayTrainingHeadline,
   identifyGymSessionForDateAndSteps,
   toExerciseStep,
   type GymSession,
+  type SessionReadiness,
 } from "@/lib/weekly-gym-program";
 import {
   fetchExerciseVolumeRowsForRange,
@@ -172,7 +174,7 @@ const COMPOUND_LIFT_KEYWORDS = [
 ];
 const readinessFeedbackLine = (readiness: ReadinessLevel): string | null => {
   if (readiness === "fresh") return "Volume increased today. Load targets nudged up.";
-  if (readiness === "tired") return "Volume reduced due to fatigue. Load targets nudged down.";
+  if (readiness === "tired") return "Volume reduced due to fatigue.";
   return null;
 };
 const readinessForTrainingLevel = (readiness: ReadinessLevel, level: TrainingLevel): ReadinessLevel => {
@@ -417,7 +419,8 @@ const createDailyQuests = (
   weeklyVolume: WeeklyVolumeByMuscle = EMPTY_WEEKLY_VOLUME,
   sessionOverride: GymSession | null = null,
   trainingLevel: TrainingLevel = "intermediate",
-  programWeek: ProgramWeekInfo = { weekNumber: 1, intent: "Build baseline" }
+  programWeek: ProgramWeekInfo = { weekNumber: 1, intent: "Build baseline" },
+  readiness: SessionReadiness = "normal"
 ): DailyQuest[] => {
   void previous;
   const pathLevel = getPathLevelFromXp(trainingXp.strength?.xp ?? 0);
@@ -439,11 +442,18 @@ const createDailyQuests = (
       reps: repRangeForTrainingLevel(trainingLevel, e.reps),
     })),
   };
+  session = applyReadinessVolumeToSession(session, readiness);
   const auto = getSessionAutoAdjustment(localDate, session, weeklyVolume, programWeek);
   const fatigueSensitivityScale = trainingLevel === "beginner" ? 0.9 : trainingLevel === "advanced" ? 1.08 : 1;
   const adjustedAutoVolumeScale = Math.max(0.45, Math.min(1.25, auto.volumeScale * fatigueSensitivityScale));
   const paidAccelerationScale = isPaidUser && auto.volumeScale >= 0.99 ? 1.1 : 1;
   const adjustedSession = applySessionVolumeScale(session, adjustedAutoVolumeScale * paidAccelerationScale);
+  const readinessLoadNote =
+    readiness === "tired"
+      ? " Fatigue day: fewer total sets; use ~5–10% less load on main lifts if bar speed drops."
+      : readiness === "fresh"
+        ? " Fresh day: slightly higher set volume; small load increase only if form stays sharp."
+        : "";
   const instructionNote =
     auto.intensityScale < 0.99
       ? ` Use roughly ${Math.round(auto.intensityScale * 100)}% of your normal load today.`
@@ -456,7 +466,7 @@ const createDailyQuests = (
       category: "Strength",
       path: STRENGTH_PATH_ID,
       title: adjustedSession.title,
-      instruction: `${adjustedSession.instruction}${instructionNote}`,
+      instruction: `${adjustedSession.instruction}${readinessLoadNote}${instructionNote}`,
       steps: adjustedSession.exercises.map(toExerciseStep),
       why: adjustedSession.why,
       examples: adjustedSession.exercises.map((e) => `${e.name}: ${e.sets} x ${e.reps}`),
@@ -716,6 +726,7 @@ export default function Dashboard() {
         const weekSunForVolume = sundayDateKeyFromMonday(weekMonForVolume);
         const weekVolumeRows = await fetchExerciseVolumeRowsForRange(user.id, weekMonForVolume, weekSunForVolume);
         const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
+        const storedReadiness = (loadReadinessForDate(today) ?? "normal") as SessionReadiness;
 
         const { data: todayRow } = await supabase
           .from("daily_tasks")
@@ -767,7 +778,8 @@ export default function Dashboard() {
               weeklyVolume,
               null,
               resolvedTrainingLevel,
-              programWeekInfo
+              programWeekInfo,
+              storedReadiness
             );
             singleTasks = regenerated;
             singleCompleted = Array.from({ length: regenerated.length }, () => false);
@@ -797,7 +809,8 @@ export default function Dashboard() {
             weeklyVolume,
             null,
             resolvedTrainingLevel,
-            programWeekInfo
+            programWeekInfo,
+            storedReadiness
           );
           const initialCompleted = Array.from({ length: generated.length }, () => false);
           const { data: inserted } = await supabase
@@ -915,6 +928,7 @@ export default function Dashboard() {
             ? (parseTrainingLevel(window.localStorage.getItem(TRAINING_LEVEL_STORAGE_KEY)) ?? "intermediate")
             : "intermediate";
         const fallbackDate = getLocalDateKey();
+        const fallbackReadiness = (loadReadinessForDate(fallbackDate) ?? "normal") as SessionReadiness;
         const fallbackTasks = createDailyQuests(
           [],
           trainingXpForDaily,
@@ -923,7 +937,8 @@ export default function Dashboard() {
           EMPTY_WEEKLY_VOLUME,
           null,
           fallbackLevel,
-          { weekNumber: 1, intent: "Build baseline" }
+          { weekNumber: 1, intent: "Build baseline" },
+          fallbackReadiness
         );
         setProgramWeek({ weekNumber: 1, intent: "Build baseline" });
         setDailyTaskId(null);
@@ -1533,7 +1548,35 @@ export default function Dashboard() {
       weeklyVolume,
       currentSession,
       nextLevel,
-      programWeek
+      programWeek,
+      dailyReadiness as SessionReadiness
+    );
+    setDailyQuests(regenerated);
+    setExpandedQuestIds({});
+    setProtocolStepChecks({});
+    await supabase.from("daily_tasks").update({ tasks: regenerated }).eq("id", dailyTaskId);
+  };
+
+  const regenerateTodaySessionForReadiness = async (next: ReadinessLevel) => {
+    if (!userId || !dailyTaskId || dailyQuests.length === 0 || completed[0]) return;
+    const today = getLocalDateKey();
+    const [y, m, d] = today.split("-").map(Number);
+    const localDate = new Date(y, m - 1, d);
+    const baseSession = getGymSessionForDate(localDate);
+    const weekMon = mondayDateKeyForLocalWeekContaining(today);
+    const weekSun = sundayDateKeyFromMonday(weekMon);
+    const weekVolumeRows = await fetchExerciseVolumeRowsForRange(userId, weekMon, weekSun);
+    const weeklyVolume = calculateWeeklyVolumeByMuscle(weekVolumeRows);
+    const regenerated = createDailyQuests(
+      [],
+      trainingXpStateRef.current,
+      today,
+      effectivePro,
+      weeklyVolume,
+      baseSession,
+      trainingLevel,
+      programWeek,
+      next as SessionReadiness
     );
     setDailyQuests(regenerated);
     setExpandedQuestIds({});
@@ -2157,7 +2200,8 @@ export default function Dashboard() {
                       EMPTY_WEEKLY_VOLUME,
                       null,
                       level,
-                      { weekNumber: 1, intent: "Build baseline" }
+                      { weekNumber: 1, intent: "Build baseline" },
+                      dailyReadiness as SessionReadiness
                     );
                     setDailyTaskId(null);
                     setDailyQuests(localTasks);
@@ -2542,6 +2586,7 @@ export default function Dashboard() {
                     onClick={() => {
                       setDailyReadiness(r);
                       saveReadinessForDate(getLocalDateKey(), r);
+                      void regenerateTodaySessionForReadiness(r);
                     }}
                     className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
                       dailyReadiness === r
@@ -2553,10 +2598,10 @@ export default function Dashboard() {
                   </button>
                 ))}
               </div>
-              {(effectiveDailyReadiness === "fresh" || effectiveDailyReadiness === "tired") && (
+              {(dailyReadiness === "fresh" || dailyReadiness === "tired") && (
                 <div className="mt-2 space-y-1">
                   <p className="text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
-                  <p className="text-[10px] text-zinc-500">{readinessFeedbackLine(effectiveDailyReadiness)}</p>
+                  <p className="text-[10px] text-zinc-500">{readinessFeedbackLine(dailyReadiness)}</p>
                 </div>
               )}
             </div>
