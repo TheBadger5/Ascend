@@ -26,8 +26,6 @@ import { getCurrentUser, type ProfileRow } from "@/lib/ascend-data";
 import {
   getActivePathUnlocks,
   getNewlyUnlockedForLevel,
-  getNextStrengthUnlock,
-  getPathUnlocks,
   type PathUnlock,
 } from "@/lib/path-unlocks";
 import {
@@ -112,9 +110,6 @@ import {
 } from "@/lib/strength-identity";
 import {
   formatUnlockCelebration,
-  lockedPathTeaser,
-  nextUnlockAnticipationLine,
-  unlockLevelPreviewLine,
 } from "@/lib/unlock-messaging";
 import {
   applyReadinessAdjustments,
@@ -124,7 +119,6 @@ import {
   type ReadinessLevel,
 } from "@/lib/readiness-adjust";
 import {
-  STAY_CONSISTENT_REMINDER,
   formatNextSessionAvailableLine,
   formatWeeklyGoalLine,
   formatXpToNextLevelLine,
@@ -255,6 +249,32 @@ type ExerciseInputField = "weight" | "reps" | "sets" | "effort";
 
 const getExerciseInputKey = (questId: number, exerciseName: string, field: ExerciseInputField): string =>
   `exercise:${questId}:${normalizeExerciseName(exerciseName)}:${field}`;
+
+async function retryAsync<T>(
+  label: string,
+  fn: () => Promise<T>,
+  opts?: { attempts?: number; baseDelayMs?: number }
+): Promise<T> {
+  const attempts = Math.max(1, opts?.attempts ?? 3);
+  const baseDelayMs = Math.max(50, opts?.baseDelayMs ?? 250);
+  let lastError: unknown;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      if (i > 1) {
+        console.log("[HOME LOAD DEBUG] retrying request", { label, attempt: i, attempts });
+      }
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      console.warn("[HOME LOAD DEBUG] request failed", { label, attempt: i, attempts, error });
+      if (i < attempts) {
+        const sleepMs = baseDelayMs * i;
+        await new Promise((resolve) => window.setTimeout(resolve, sleepMs));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Failed request after retries: ${label}`);
+}
 
 const hasStructuredQuestShape = (value: unknown): value is DailyQuest => {
   if (!value || typeof value !== "object") return false;
@@ -540,6 +560,7 @@ export default function Dashboard() {
   const [systemIntegrityScore, setSystemIntegrityScore] = useState(100);
   const [dailyReadiness, setDailyReadiness] = useState<ReadinessLevel>("normal");
   const [weeklySessionsCount, setWeeklySessionsCount] = useState(0);
+  const [hasCompletedFirstWorkout, setHasCompletedFirstWorkout] = useState(false);
   const [weeklyStrengthStats, setWeeklyStrengthStats] = useState<{ totalVolume: number; strongestLift: string | null }>({
     totalVolume: 0,
     strongestLift: null,
@@ -2282,16 +2303,6 @@ export default function Dashboard() {
   const xpToNextRetentionLine = formatXpToNextLevelLine(pathXp);
   const pathLevelForUnlocks = getPathLevelFromXp(pathXp);
   const effUnlockLevel = effectiveLevelForPathUnlocks(pathLevelForUnlocks, effectivePro);
-  const nextStrengthUnlock = getNextStrengthUnlock(STRENGTH_PATH_ID, effUnlockLevel);
-  const unlockAnticipation = nextUnlockAnticipationLine({
-    currentXp: pathXp,
-    effectivePro,
-    nextUnlock: nextStrengthUnlock,
-  });
-  const furtherLockedUnlocks = getPathUnlocks(STRENGTH_PATH_ID)
-    .filter((u) => u.levelRequirement > effUnlockLevel)
-    .sort((a, b) => a.levelRequirement - b.levelRequirement)
-    .slice(1, 3);
   const effectiveDailyReadiness = readinessForTrainingLevel(dailyReadiness, trainingLevel);
 
   return (
@@ -2473,6 +2484,9 @@ export default function Dashboard() {
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-400/90">Strength System Active</p>
             <div className="mt-3 space-y-1">
               <p className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">Strength Level {level}</p>
+              <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-zinc-500">
+                Week {programWeek.weekNumber} · {programWeek.intent}
+              </p>
               <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-zinc-600">
                 Rank · <span className="text-zinc-400">{strengthRank}</span>
               </p>
@@ -2527,7 +2541,6 @@ export default function Dashboard() {
             {weeklyStrengthStats.strongestLift && (
               <p className="text-[11px] leading-relaxed text-zinc-500">Strongest lift: {weeklyStrengthStats.strongestLift}</p>
             )}
-            <p className="text-[10px] leading-relaxed text-zinc-600">{STAY_CONSISTENT_REMINDER}</p>
           </div>
 
           {isPaidReady && !isPaidUser && (
@@ -2543,38 +2556,8 @@ export default function Dashboard() {
             </div>
           )}
 
-          <p className="mb-2 text-sm font-medium leading-snug text-zinc-200">{getTodayTrainingHeadline(new Date())}</p>
-          <p className="mb-3 text-[11px] text-zinc-600">
-            Weekly structure rotates by weekday: Upper Push, Lower, Recovery, Upper Pull, Lower/Full, then recovery.
-          </p>
-          {nextStrengthUnlock && (
-            <div className="mb-4 space-y-2 border-b border-zinc-800/60 pb-4">
-              {unlockAnticipation && (
-                <p className="text-[11px] font-medium leading-relaxed text-zinc-300">{unlockAnticipation}</p>
-              )}
-              <p className="text-[11px] leading-relaxed text-zinc-500">{unlockLevelPreviewLine(nextStrengthUnlock)}</p>
-            </div>
-          )}
-
-          {furtherLockedUnlocks.length > 0 && (
-            <div className="mb-5">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-600">Also coming</p>
-              <ul className="mt-2 space-y-2">
-                {furtherLockedUnlocks.map((u) => (
-                  <li
-                    key={`${u.title}-${u.levelRequirement}`}
-                    className="rounded-lg border border-zinc-800/90 bg-zinc-950/50 px-3 py-2 opacity-[0.82]"
-                  >
-                    <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-600">
-                      Level {u.levelRequirement} · {u.title}
-                    </p>
-                    <p className="mt-1 text-[11px] leading-snug text-zinc-600">{lockedPathTeaser(u)}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today&apos;s Session</h2>
+          <p className="mb-1 text-base font-medium leading-snug text-zinc-200">{getTodayTrainingHeadline(new Date())}</p>
           {dailyQuests.length > 0 && !completed[0] && (
             <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-3">
               <p className="text-[11px] font-medium text-zinc-300">How do you feel today?</p>
@@ -2642,12 +2625,7 @@ export default function Dashboard() {
             {trainingLevelNotice && <p className="mt-2 text-[10px] text-zinc-500">{trainingLevelNotice}</p>}
           </div>
 
-          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today's Training</h2>
-          <p className="mb-2 text-[11px] text-zinc-400">
-            Week {programWeek.weekNumber} - {programWeek.intent}
-          </p>
           <div className="mb-3 space-y-1">
-            <p className="text-[11px] text-zinc-400">You're on Week {programWeek.weekNumber} of your system.</p>
             <p className="text-[10px] text-zinc-500">Your training is progressing through structure, not guesswork.</p>
             <p className="text-[10px] text-zinc-600">Your system is evolving.</p>
           </div>
@@ -2677,6 +2655,7 @@ export default function Dashboard() {
               <p className="mt-1 text-sm text-zinc-500 line-through">{yesterdayProtocolTitle}</p>
             </div>
           )}
+          <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Exercise List</p>
           <ul className="flex flex-col gap-4">
             {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
           </ul>
