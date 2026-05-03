@@ -588,6 +588,7 @@ export default function Dashboard() {
     src: string;
     exerciseName: string;
     source: string;
+    cues: string[];
   } | null>(null);
 
   useEffect(() => {
@@ -1935,6 +1936,15 @@ export default function Dashboard() {
                     const repsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "reps");
                     const setsKey = getExerciseInputKey(effectiveQuest.id, spec.name, "sets");
                     const effortKey = getExerciseInputKey(effectiveQuest.id, spec.name, "effort");
+                    const defaultWeight = last?.last_weight ? String(last.last_weight) : "";
+                    const defaultReps = last?.last_reps?.length ? last.last_reps.join(",") : "";
+                    const defaultSets = last?.sets_completed ? String(last.sets_completed) : "";
+                    const rawWeightInput = getEffectInput(effectiveQuest.id, weightKey);
+                    const rawRepsInput = getEffectInput(effectiveQuest.id, repsKey);
+                    const rawSetsInput = getEffectInput(effectiveQuest.id, setsKey);
+                    const shownWeight = rawWeightInput || defaultWeight;
+                    const shownReps = rawRepsInput || defaultReps;
+                    const shownSets = rawSetsInput || defaultSets;
                     const selectedEffort = getEffectInput(effectiveQuest.id, effortKey);
                     const effortUnlocked = trainingLevel === "advanced";
                     return (
@@ -1949,6 +1959,7 @@ export default function Dashboard() {
                                     src: visual.src,
                                     exerciseName: spec.name,
                                     source: visual.source,
+                                    cues: visual.cues.slice(0, 3),
                                   })
                                 }
                                 className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 transition-colors hover:border-zinc-500"
@@ -1981,21 +1992,90 @@ export default function Dashboard() {
                             progressionSpeedForTrainingLevel(trainingLevel)
                           )}
                         </p>
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="rounded-full border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] text-zinc-300 hover:border-zinc-600"
+                            onClick={() => {
+                              if (!rawWeightInput && defaultWeight) setEffectInput(effectiveQuest.id, weightKey, defaultWeight);
+                              if (!rawRepsInput && defaultReps) setEffectInput(effectiveQuest.id, repsKey, defaultReps);
+                              if (!rawSetsInput && defaultSets) setEffectInput(effectiveQuest.id, setsKey, defaultSets);
+                            }}
+                          >
+                            Quick confirm
+                          </button>
+                          {last && (
+                            <p className="text-[10px] text-zinc-500">Uses last session as default.</p>
+                          )}
+                        </div>
                         <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                          <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2">
+                            <p className="text-[10px] text-zinc-500">Weight (kg)</p>
+                            <div className="mt-1 flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-300"
+                                onClick={() => {
+                                  const base = Number.parseFloat(shownWeight || "0");
+                                  const next = Number(Math.max(0, (Number.isFinite(base) ? base : 0) - 2.5).toFixed(1));
+                                  setEffectInput(effectiveQuest.id, weightKey, next > 0 ? String(next) : "");
+                                }}
+                              >
+                                -
+                              </button>
+                              <input
+                                value={shownWeight}
+                                onChange={(event) => setEffectInput(effectiveQuest.id, weightKey, event.target.value)}
+                                placeholder="0"
+                                className="w-full bg-transparent px-1 text-center text-sm text-zinc-100 outline-none"
+                              />
+                              <button
+                                type="button"
+                                className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-300"
+                                onClick={() => {
+                                  const base = Number.parseFloat(shownWeight || "0");
+                                  const next = Number(((Number.isFinite(base) ? base : 0) + 2.5).toFixed(1));
+                                  setEffectInput(effectiveQuest.id, weightKey, String(next));
+                                }}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2">
+                            <p className="text-[10px] text-zinc-500">Reps per set</p>
+                            <div className="mt-1 flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-300"
+                                onClick={() => {
+                                  const base = parseRepsCsv(shownReps || "").map((r) => Math.max(1, r - 1));
+                                  setEffectInput(effectiveQuest.id, repsKey, base.join(","));
+                                }}
+                              >
+                                -
+                              </button>
+                              <input
+                                value={shownReps}
+                                onChange={(event) => setEffectInput(effectiveQuest.id, repsKey, event.target.value)}
+                                placeholder="8,7,6"
+                                className="w-full bg-transparent px-1 text-center text-sm text-zinc-100 outline-none"
+                              />
+                              <button
+                                type="button"
+                                className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-300"
+                                onClick={() => {
+                                  const parsed = parseRepsCsv(shownReps || "");
+                                  const base = parsed.length > 0 ? parsed.map((r) => r + 1) : [8];
+                                  setEffectInput(effectiveQuest.id, repsKey, base.join(","));
+                                }}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
                           <input
-                            value={getEffectInput(effectiveQuest.id, weightKey)}
-                            onChange={(event) => setEffectInput(effectiveQuest.id, weightKey, event.target.value)}
-                            placeholder="Weight (kg)"
-                            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
-                          />
-                          <input
-                            value={getEffectInput(effectiveQuest.id, repsKey)}
-                            onChange={(event) => setEffectInput(effectiveQuest.id, repsKey, event.target.value)}
-                            placeholder="Reps per set (e.g. 8,7,6)"
-                            className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
-                          />
-                          <input
-                            value={getEffectInput(effectiveQuest.id, setsKey)}
+                            value={shownSets}
                             onChange={(event) => setEffectInput(effectiveQuest.id, setsKey, event.target.value)}
                             placeholder="Sets completed"
                             className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500"
@@ -2320,6 +2400,16 @@ export default function Dashboard() {
             <p className="mt-3 text-sm leading-relaxed text-zinc-400">{PROTOCOL_COMPLETION_CONTEXT}</p>
             <p className="mt-4 text-sm leading-relaxed text-zinc-300">{PROTOCOL_COMPLETION_SUBLINE}</p>
             <p className="mt-2 text-sm font-medium leading-relaxed text-zinc-200">Your system is progressing.</p>
+            {(protocolCompletionFeedback.strengthImproved || protocolCompletionFeedback.liftedMore) && (
+              <div className="mt-4 rounded-lg border border-emerald-500/35 bg-emerald-950/20 px-3 py-2.5">
+                <p className="text-sm font-semibold text-emerald-300">↗ You beat your last session</p>
+                {protocolCompletionFeedback.volumeChangePercent != null && protocolCompletionFeedback.volumeChangePercent > 0 && (
+                  <p className="mt-1 text-[11px] text-emerald-200/90">
+                    Current performance vs last session: +{protocolCompletionFeedback.volumeChangePercent}% volume.
+                  </p>
+                )}
+              </div>
+            )}
             {protocolCompletionFeedback.streakLine && (
               <div className="mt-6 border-t border-zinc-800/80 pt-5">
                 <p className="text-sm leading-relaxed text-zinc-300">{protocolCompletionFeedback.streakLine}</p>
@@ -2454,34 +2544,148 @@ export default function Dashboard() {
                 className="h-auto w-full"
               />
             </div>
+            <div className="mt-3 rounded-lg border border-zinc-800/90 bg-zinc-900/60 px-3 py-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Quick cues</p>
+              <ul className="mt-1.5 space-y-1">
+                {expandedExerciseVisual.cues.map((cue) => (
+                  <li key={cue} className="text-[11px] text-zinc-300">
+                    • {cue}
+                  </li>
+                ))}
+              </ul>
+            </div>
             <p className="mt-2 text-[11px] text-zinc-500">Visual source: {expandedExerciseVisual.source}</p>
           </div>
         </div>
       )}
-      <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-10">
-        <section className="w-full max-w-md">
-          <div className="mb-8 border-b border-zinc-800/60 pb-8">
-            <h1 className="text-2xl font-semibold leading-tight tracking-tight text-zinc-50 md:text-[1.65rem]">{HOME_HERO_HEADLINE}</h1>
-            <p className="mt-3 text-sm leading-relaxed text-zinc-500">{HOME_HERO_SUBHEADLINE}</p>
+      <main className="mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl justify-center px-4 py-8">
+        <section className="w-full max-w-md space-y-5">
+          <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-4">
+            <h1 className="text-[1.35rem] font-semibold leading-tight tracking-tight text-zinc-50">{HOME_HERO_HEADLINE}</h1>
+            <p className="mt-2 text-sm leading-relaxed text-zinc-400">{HOME_HERO_SUBHEADLINE}</p>
           </div>
-          <header className="mb-8 border-b border-zinc-800/90 pb-8">
-            <div className="mb-6 border-b border-zinc-800/50 pb-5">
-              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-600">System Integrity</p>
-              <p className="mt-1.5 flex flex-wrap items-baseline gap-x-2 text-sm tabular-nums">
-                <span className="font-medium text-zinc-200">{systemIntegrityScore}</span>
-                <span className="text-zinc-600">/</span>
-                <span className="text-zinc-600">100</span>
-                <span className="text-zinc-600">·</span>
-                <span
-                  className={
-                    systemIntegrityScore >= 60 ? "text-xs font-medium text-zinc-500" : "text-xs font-medium text-amber-500/85"
-                  }
-                >
-                  {getIntegrityStatusLabel(systemIntegrityScore)}
-                </span>
+
+          <div className="rounded-2xl border border-zinc-700/80 bg-zinc-900/70 px-4 py-4 shadow-[0_12px_30px_-24px_rgba(255,255,255,0.2)]">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Today&apos;s Workout</p>
+            <p className="mt-1 text-base font-medium text-zinc-100">{getTodayTrainingHeadline(new Date())}</p>
+            <button
+              type="button"
+              disabled={dailyQuests.length === 0 || completed[0]}
+              onClick={() => {
+                const firstQuest = dailyQuests[0];
+                if (!firstQuest) return;
+                const stepCount = getProtocolDetailFromQuest(firstQuest).steps.length;
+                handleStartProtocol(firstQuest, stepCount);
+              }}
+              className="mt-3 w-full rounded-lg bg-zinc-100 py-2.5 text-sm font-semibold text-zinc-900 transition-colors hover:bg-white disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
+            >
+              {completed[0] ? "Session Completed" : "Start Session"}
+            </button>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 px-4 py-4">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today&apos;s Session</h2>
+            <p className="mt-1 text-base font-medium leading-snug text-zinc-100">{getTodayTrainingHeadline(new Date())}</p>
+            <div className="mt-2 space-y-1">
+              <p className="text-[10px] text-zinc-400">Your training is progressing through structure, not guesswork.</p>
+              <p className="text-[11px] leading-relaxed text-zinc-400">
+                {weeklySessionsCount > 0
+                  ? "This session is designed to improve your strength based on your previous performance."
+                  : "This session is designed to improve your strength by setting your first performance baseline."}
               </p>
             </div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-400/90">Strength System Active</p>
+
+            {dailyQuests.length > 0 && !completed[0] && (
+              <div className="mt-3 rounded-xl border border-zinc-800/80 bg-zinc-950/50 px-3 py-3">
+                <p className="text-[11px] font-medium text-zinc-300">How do you feel today?</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(["fresh", "normal", "tired"] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => {
+                        setDailyReadiness(r);
+                        saveReadinessForDate(getLocalDateKey(), r);
+                        void regenerateTodaySessionForReadiness(r);
+                      }}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                        dailyReadiness === r
+                          ? "border-emerald-500/45 bg-emerald-950/25 text-emerald-100/95"
+                          : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
+                      }`}
+                    >
+                      {r === "fresh" ? "Fresh" : r === "normal" ? "Normal" : "Tired"}
+                    </button>
+                  ))}
+                </div>
+                {(dailyReadiness === "fresh" || dailyReadiness === "tired") && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
+                    <p className="text-[10px] text-zinc-500">{readinessFeedbackLine(dailyReadiness)}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="mt-3 rounded-xl border border-zinc-800/80 bg-zinc-950/50 px-3 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-medium text-zinc-300">Training Level</p>
+                <p className="text-[10px] text-zinc-500">{trainingLevelLabel(trainingLevel)}</p>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(["beginner", "intermediate", "advanced"] as const).map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    disabled={trainingLevelSaving}
+                    onClick={() => void updateTrainingLevelSetting(lvl)}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      trainingLevel === lvl
+                        ? "border-zinc-400 bg-zinc-100 text-zinc-900"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
+                    }`}
+                  >
+                    {trainingLevelLabel(lvl)}
+                  </button>
+                ))}
+              </div>
+              {!completed[0] && dailyQuests.length > 0 && (
+                <button
+                  type="button"
+                  disabled={trainingLevelSaving}
+                  onClick={() => void updateTrainingLevelSetting(trainingLevel, { applyToToday: true })}
+                  className="mt-2 text-[10px] text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
+                >
+                  Apply to today&apos;s session
+                </button>
+              )}
+              {trainingLevelNotice && <p className="mt-2 text-[10px] text-zinc-500">{trainingLevelNotice}</p>}
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Exercise List</p>
+            <ul className="flex flex-col gap-4">
+              {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
+            </ul>
+          </div>
+
+          {dailyQuests.length > 0 && completed[0] && (
+            <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/25 px-4 py-3">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Optional Conditioning</p>
+              <p className="mt-1 text-[11px] text-zinc-500">Optional 10-20 min easy cardio. Not tied to XP or progression.</p>
+              <button
+                type="button"
+                onClick={() => setOptionalConditioningDone((prev) => !prev)}
+                className="mt-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[11px] text-zinc-300 transition-colors hover:border-zinc-600"
+              >
+                {optionalConditioningDone ? "Conditioning logged (optional)" : "Mark optional conditioning done"}
+              </button>
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 px-4 py-4">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-400/90">System Status</p>
             <div className="mt-3 space-y-1">
               <p className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">Strength Level {level}</p>
               <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-zinc-500">
@@ -2491,60 +2695,27 @@ export default function Dashboard() {
                 Rank · <span className="text-zinc-400">{strengthRank}</span>
               </p>
             </div>
-            <div className="mt-5">
+            <div className="mt-4">
               <div className="flex items-center justify-between text-xs text-zinc-500">
-                <span>Experience</span>
-                <span className="tabular-nums text-zinc-400">
-                  {xpInCurrentLevel}/100 XP
-                </span>
+                <span>XP Progress</span>
+                <span className="tabular-nums text-zinc-300">{xpInCurrentLevel}/100 XP</span>
               </div>
               <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
-                <div
-                  className="h-full rounded-full bg-emerald-500/85 transition-[width] duration-300"
-                  style={{ width: `${levelProgressPercent}%` }}
-                />
+                <div className="h-full rounded-full bg-emerald-500/85 transition-[width] duration-300" style={{ width: `${levelProgressPercent}%` }} />
               </div>
-              {(() => {
-                const prog = getProgressionSummary(trainingXpState, {
-                  sessionsRequired: getSessionsRequiredForLevelUp(effectivePro),
-                });
-                return (
-                  <div className="mt-4 space-y-1.5 border-t border-zinc-800/80 pt-4">
-                    <p className="text-[11px] text-zinc-400">
-                      <span className="tabular-nums text-zinc-200">
-                        {prog.sessionsTowardNextLevel}/{prog.sessionsRequired}
-                      </span>{" "}
-                      sessions completed to advance
-                    </p>
-                    {prog.atXpCapForLevel && !prog.canLevelUpWithCurrentXp && (
-                      <p className="text-[11px] leading-snug text-amber-400/90">
-                        XP capped at this level — complete {prog.sessionsRequired} distinct daily protocols before you can level up.
-                      </p>
-                    )}
-                  </div>
-                );
-              })()}
             </div>
-          </header>
-
-          <div className="mb-5 space-y-1.5 rounded-lg border border-zinc-800/60 bg-zinc-950/30 px-3 py-2.5">
-            {completed[0] && dailyQuests.length > 0 && (
-              <p className="text-[11px] leading-relaxed text-zinc-500">{formatNextSessionAvailableLine(expiryMs)}</p>
-            )}
-            {xpToNextRetentionLine && (
-              <p className="text-[11px] leading-relaxed text-zinc-500">{xpToNextRetentionLine}</p>
-            )}
-            <p className="text-[11px] leading-relaxed text-zinc-500">{formatWeeklyGoalLine(weeklySessionsCount)}</p>
-            <p className="text-[11px] leading-relaxed text-zinc-500">
-              Total volume this week: {weeklyStrengthStats.totalVolume.toLocaleString()}
-            </p>
-            {weeklyStrengthStats.strongestLift && (
-              <p className="text-[11px] leading-relaxed text-zinc-500">Strongest lift: {weeklyStrengthStats.strongestLift}</p>
-            )}
+            <div className="mt-4 space-y-1 text-[11px] text-zinc-500">
+              <p>System integrity: <span className="tabular-nums text-zinc-300">{systemIntegrityScore}/100</span></p>
+              <p>{formatWeeklyGoalLine(weeklySessionsCount)}</p>
+              <p>Total volume this week: {weeklyStrengthStats.totalVolume.toLocaleString()}</p>
+              {weeklyStrengthStats.strongestLift && <p>Strongest lift: {weeklyStrengthStats.strongestLift}</p>}
+              {xpToNextRetentionLine && <p>{xpToNextRetentionLine}</p>}
+              {completed[0] && dailyQuests.length > 0 && <p>{formatNextSessionAvailableLine(expiryMs)}</p>}
+            </div>
           </div>
 
           {isPaidReady && !isPaidUser && (
-            <div className="mb-5">
+            <div>
               <ProLockedCard
                 variant="compact"
                 notice={
@@ -2556,133 +2727,7 @@ export default function Dashboard() {
             </div>
           )}
 
-          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Today&apos;s Session</h2>
-          <p className="mb-1 text-base font-medium leading-snug text-zinc-200">{getTodayTrainingHeadline(new Date())}</p>
-          {dailyQuests.length > 0 && !completed[0] && (
-            <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-3">
-              <p className="text-[11px] font-medium text-zinc-300">How do you feel today?</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(["fresh", "normal", "tired"] as const).map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => {
-                      setDailyReadiness(r);
-                      saveReadinessForDate(getLocalDateKey(), r);
-                      void regenerateTodaySessionForReadiness(r);
-                    }}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
-                      dailyReadiness === r
-                        ? "border-emerald-500/45 bg-emerald-950/25 text-emerald-100/95"
-                        : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
-                    }`}
-                  >
-                    {r === "fresh" ? "Fresh" : r === "normal" ? "Normal" : "Tired"}
-                  </button>
-                ))}
-              </div>
-              {(dailyReadiness === "fresh" || dailyReadiness === "tired") && (
-                <div className="mt-2 space-y-1">
-                  <p className="text-[11px] text-emerald-500/90">{SESSION_ADJUSTED_MESSAGE}</p>
-                  <p className="text-[10px] text-zinc-500">{readinessFeedbackLine(dailyReadiness)}</p>
-                </div>
-              )}
-            </div>
-          )}
-          <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-3">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-medium text-zinc-300">Training Level</p>
-              <p className="text-[10px] text-zinc-500">{trainingLevelLabel(trainingLevel)}</p>
-            </div>
-            <p className="mt-1 text-[10px] text-zinc-500">This changes how challenging your sessions are.</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {(["beginner", "intermediate", "advanced"] as const).map((lvl) => (
-                <button
-                  key={lvl}
-                  type="button"
-                  disabled={trainingLevelSaving}
-                  onClick={() => void updateTrainingLevelSetting(lvl)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
-                    trainingLevel === lvl
-                      ? "border-zinc-400 bg-zinc-100 text-zinc-900"
-                      : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600"
-                  }`}
-                >
-                  {trainingLevelLabel(lvl)}
-                </button>
-              ))}
-            </div>
-            {!completed[0] && dailyQuests.length > 0 && (
-              <button
-                type="button"
-                disabled={trainingLevelSaving}
-                onClick={() => void updateTrainingLevelSetting(trainingLevel, { applyToToday: true })}
-                className="mt-2 text-[10px] text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
-              >
-                Apply to today&apos;s session
-              </button>
-            )}
-            {trainingLevelNotice && <p className="mt-2 text-[10px] text-zinc-500">{trainingLevelNotice}</p>}
-          </div>
-
-          <div className="mb-3 space-y-1">
-            <p className="text-[10px] text-zinc-500">Your training is progressing through structure, not guesswork.</p>
-            <p className="text-[10px] text-zinc-600">Your system is evolving.</p>
-          </div>
-          <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">
-            {weeklySessionsCount > 0
-              ? "This session is designed to improve your strength based on your previous performance."
-              : "This session is designed to improve your strength by setting your first performance baseline."}
-          </p>
-          <div className="mb-4 space-y-2">
-            {pressureStreakLine && (
-              <p className="text-[11px] leading-relaxed text-zinc-500">{pressureStreakLine}</p>
-            )}
-            {yesterdayDailyMissed && (
-              <p className="text-[11px] leading-relaxed text-amber-500/80">{MISSED_YESTERDAY_SESSION}</p>
-            )}
-            {dailyQuests.length > 0 && !completed[0] && (
-              <>
-                <p className="text-[11px] leading-relaxed text-zinc-500">{trainingProtocolExpirySentence(expiryMs)}</p>
-                <p className="text-[11px] leading-relaxed text-zinc-600">{URGENCY_MAINTAIN_SYSTEM}</p>
-                <p className="text-[10px] leading-relaxed text-zinc-600/75">{INTEGRITY_PRESSURE_HINT}</p>
-              </>
-            )}
-          </div>
-          {yesterdayDailyMissed && yesterdayProtocolTitle && (
-            <div className="mb-4 rounded-lg border border-zinc-800/90 bg-zinc-900/35 px-3 py-2.5">
-              <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-600">Missed</p>
-              <p className="mt-1 text-sm text-zinc-500 line-through">{yesterdayProtocolTitle}</p>
-            </div>
-          )}
-          <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Exercise List</p>
-          <ul className="flex flex-col gap-4">
-            {dailyQuests.map((quest, idx) => renderProtocolBlock(quest, { kind: "daily", idx }))}
-          </ul>
-          {dailyQuests.length > 0 && completed[0] && (
-            <div className="mt-6 space-y-3">
-              <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 px-4 py-3">
-                <p className="text-sm font-semibold text-emerald-100/95">Session Complete</p>
-                <p className="mt-1 text-[11px] text-emerald-200/80">
-                  Today&apos;s structured training is done. XP, progression, and logs are finalized.
-                </p>
-              </div>
-              <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/25 px-4 py-3">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Optional Conditioning</p>
-                <p className="mt-1 text-[11px] text-zinc-500">Optional 10-20 min easy cardio. Not tied to XP or progression.</p>
-                <button
-                  type="button"
-                  onClick={() => setOptionalConditioningDone((prev) => !prev)}
-                  className="mt-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[11px] text-zinc-300 transition-colors hover:border-zinc-600"
-                >
-                  {optionalConditioningDone ? "Conditioning logged (optional)" : "Mark optional conditioning done"}
-                </button>
-              </div>
-            </div>
-          )}
-          <p className="mt-8 text-center text-xs text-zinc-600">
-            Streak {currentStreak} · Best {bestStreak}
-          </p>
+          <p className="text-center text-xs text-zinc-600">Streak {currentStreak} · Best {bestStreak}</p>
         </section>
       </main>
     </div>

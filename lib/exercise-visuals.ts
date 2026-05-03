@@ -2,11 +2,12 @@ export type ExerciseVisual = {
   src: string;
   label: string;
   source: string;
+  cues: string[];
 };
 
 const VISUAL_SOURCE = "Ascend movement SVG pack";
 
-const EXERCISE_VISUAL_MAP: Record<string, Omit<ExerciseVisual, "source">> = {
+const EXERCISE_VISUAL_MAP: Record<string, Omit<ExerciseVisual, "source" | "cues">> = {
   "barbell bench press": { src: "/exercise-visuals/push.svg", label: "Barbell bench press demo" },
   "bench press": { src: "/exercise-visuals/push.svg", label: "Bench press demo" },
   "incline barbell bench press": { src: "/exercise-visuals/push.svg", label: "Incline barbell bench press demo" },
@@ -74,5 +75,15 @@ export function getExerciseVisual(name: string): ExerciseVisual | null {
   const normalized = normalizeExerciseName(name);
   const mapped = EXERCISE_VISUAL_MAP[normalized];
   if (!mapped) return null;
-  return { ...mapped, source: VISUAL_SOURCE };
+  const cuesBySrc: Record<string, string[]> = {
+    "/exercise-visuals/push.svg": ["Brace hard before each rep", "Lower under control", "Press with stable bar path"],
+    "/exercise-visuals/pull.svg": ["Set shoulders down and back", "Lead with elbows", "Pause briefly at full contraction"],
+    "/exercise-visuals/squat.svg": ["Brace and keep chest tall", "Drive knees over toes", "Stand up with full foot pressure"],
+    "/exercise-visuals/hinge.svg": ["Push hips back first", "Keep spine neutral", "Finish by squeezing glutes"],
+    "/exercise-visuals/lunge.svg": ["Take a stable stance", "Control the descent", "Drive through front mid-foot"],
+    "/exercise-visuals/core.svg": ["Keep ribs down", "Move with control", "Stop before form breaks"],
+    "/exercise-visuals/conditioning.svg": ["Keep steady breathing", "Hold repeatable pace", "Prioritise smooth movement"],
+    "/exercise-visuals/accessory.svg": ["Use full range", "Control both directions", "Keep tempo strict"],
+  };
+  return { ...mapped, source: VISUAL_SOURCE, cues: cuesBySrc[mapped.src] ?? ["Use controlled reps", "Keep form tight"] };
 }
